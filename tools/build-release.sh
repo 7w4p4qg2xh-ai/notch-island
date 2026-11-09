@@ -11,13 +11,16 @@
 # 而不是 cdhash，所以重编不会让你重新授权。
 #
 # 注意：脚本必须在你的终端里跑，Agent 沙箱里跑不了 xcodebuild。
-set -uo pipefail
+# 注意：不要加 `set -u`。这个脚本在管道子 shell 里引用 SIGN_ID/APP_NAME，
+# nounset 会在某些 bash 版本上报 "SIGN_ID: unbound variable" 直接中断，
+# 而中断点正好在重签之前——编译已成功、app 已拷好，却停在 ad-hoc 签名状态。
+set -o pipefail
 
 WS="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$WS" || exit 1
 
 APP_NAME="Notch Island"
-SIGN_ID="BoringNotchLocal"
+SIGN_ID="${SIGN_ID:-BoringNotchLocal}"
 INSTALL=1
 DEST="/Applications/$APP_NAME.app"
 OUT_DIR="$WS/build/Products/Release"
@@ -83,18 +86,25 @@ echo "=== 重签（$SIGN_ID）==="
 find "$DEST" -name "*.cstemp*" -delete 2>/dev/null
 
 find "$DEST/Contents/Frameworks" -type f -perm -111 2>/dev/null | while read -r f; do
-    codesign --force --sign "$SIGN_ID" "$f" >/dev/null 2>&1
+    codesign --force --sign "$SIGN_ID" "$f" >/dev/null 2>&1 \
+        || echo "    签名失败：$f"
 done
 
 find "$DEST" -depth -type d \
     \( -name "*.framework" -o -name "*.xpc" -o -name "*.app" -o -name "*.bundle" -o -name "*.appex" \) \
     2>/dev/null | while read -r f; do
-    codesign --force --sign "$SIGN_ID" "$f" >/dev/null 2>&1
+    codesign --force --sign "$SIGN_ID" "$f" >/dev/null 2>&1 \
+        || echo "    签名失败：$f"
 done
 
 codesign --force --sign "$SIGN_ID" "$DEST" 2>&1 | head -3
 codesign --verify --deep --strict "$DEST"
-echo "=== 签名校验 rc=$? ==="
+verify_rc=$?
+echo "=== 签名校验 rc=$verify_rc ==="
+if [[ $verify_rc -ne 0 ]]; then
+    echo "重签没通过，app 仍会是 ad-hoc 签名，TCC 权限每次重编都要重给。"
+    echo "手工补签：codesign --force --sign $SIGN_ID \"$DEST\""
+fi
 
 echo
 echo "=== 完成：$DEST ==="
