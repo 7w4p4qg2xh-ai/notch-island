@@ -1,0 +1,61 @@
+Notch Island — NOTICE
+=====================
+
+This distribution is a MODIFIED VERSION of Boring Notch. The modification
+notice below is required by section 5(a) of the GNU General Public License
+version 3.
+
+
+1. Original work
+----------------
+    Boring Notch
+    https://github.com/TheBoredTeam/boring.notch
+    Copyright (C) The Bored Team and contributors
+    Licensed under the GNU General Public License v3.0
+
+    The full license text is in the LICENSE file in this directory.
+
+    Boring Notch itself bundles third-party components; their attributions
+    are listed in THIRD_PARTY_LICENSES.
+
+
+2. Modifications
+----------------
+    Copyright (C) 2026 Notch Island contributors
+    Licensed under the GNU General Public License v3.0
+
+    Baseline: upstream tag v2.8-rc.2
+    Modifications made between 2026-11-01 and 2026-11-09 (see CHANGES.md).
+
+    In summary, this fork changes the notification pipeline, adds a
+    Bluetooth peripheral battery indicator, replaces the notch surface with
+    a custom Liquid Glass renderer, adds a floating-island presentation for
+    displays without a notch, and rewires lyric fetching. Every modified
+    file is covered by the GPL; there is no separately licensed portion.
+
+
+3. Relationship with the upstream project
+-----------------------------------------
+    THIS IS AN UNOFFICIAL FORK. It is not affiliated with, endorsed by, or
+    supported by The Bored Team. Please do not report problems with this
+    fork to the upstream project, and do not expect upstream to support it.
+
+    The upstream project ships a Sparkle appcast signed with its own EdDSA
+    key. This fork deliberately disables Sparkle (`feedURLString` returns
+    nil) and carries no upstream public key, so an installation of Notch
+    Island can never be silently replaced by the official Boring Notch
+    build.
+
+
+4. Trademarks and branding
+--------------------------
+    The name "Boring Notch", its application icon and its bundle identifier
+    (theboringteam.boringnotch) identify the upstream project and are not
+    licensed under the GPL (see GPLv3 section 7(e)). This fork has therefore
+    been renamed to "Notch Island", uses the bundle identifier
+    com.notchisland.app, and does not ship the upstream application icon.
+
+    Some UI copy inside the source still refers to "boring.notch" where it
+    labels upstream features (for example the onboarding text inherited
+    from upstream). Such references are descriptive only and do not claim
+    any trademark right.
