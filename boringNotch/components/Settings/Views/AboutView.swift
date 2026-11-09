@@ -28,7 +28,7 @@ struct AboutView: View {
     /// issue form query parameter API. Keys must match the form field ids;
     /// renaming the template or its version fields breaks shipped apps.
     private var bugReportURL: URL? {
-        var components = URLComponents(string: "https://github.com/OWNER/notch-island/issues/new")
+        var components = URLComponents(string: "https://github.com/7w4p4qg2xh-ai/notch-island/issues/new")
         components?.queryItems = [
             URLQueryItem(name: "version", value: reportVersion),
             URLQueryItem(
@@ -87,7 +87,7 @@ struct AboutView: View {
                     }
                     .help("Open a bug report with your version filled in automatically")
                     Button {
-                        if let url = URL(string: "https://github.com/OWNER/notch-island") {
+                        if let url = URL(string: "https://github.com/7w4p4qg2xh-ai/notch-island") {
                             NSWorkspace.shared.open(url)
                         }
                     } label: {
