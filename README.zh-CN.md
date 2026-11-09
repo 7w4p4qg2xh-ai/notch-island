@@ -79,6 +79,17 @@ xattr -dr com.apple.quarantine "/Applications/Notch Island.app"
 - 运行中撤销屏幕录制权限，玻璃会降级成「透明底上的白字」。这是有意设计，不是 bug。
 - 玻璃保真度靠亮度采样加肉眼确认，没有做逐像素对比。
 
+## 发布成你自己的版本
+
+源码里「关于」窗口、扩展菜单、issue 模板三处留了 `OWNER` 占位符。推到公开仓库前先跑：
+
+```bash
+./tools/set-repo.sh 你的GitHub用户名
+```
+
+然后重新编译——这些字符串是编进 app 里的，不重编的话界面上还是旧地址。想换配色改
+`tools/make-icon.swift` 重新生成图标，它是 Core Graphics 画的，不走图片生成。
+
 ## 参与
 
 欢迎 issue 和 PR，但这是个人项目，不承诺支持。改动如果属于上游范畴，请提到 [Boring Notch](https://github.com/TheBoredTeam/boring.notch)——本仓库里歌词源顺序、空闲态抑制这几处上游大概会收。

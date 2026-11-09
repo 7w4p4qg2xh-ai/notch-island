@@ -118,6 +118,19 @@ Do not do this for binaries from strangers.
 - Glass fidelity is verified by luminance sampling and by eye, not by per-pixel
   comparison against Apple's material.
 
+## Publishing your own copy
+
+The source carries an `OWNER` placeholder in the About window, the extras menu
+and the issue template. Before pushing this anywhere public:
+
+```bash
+./tools/set-repo.sh <your-github-username>
+```
+
+Then rebuild — those strings are compiled into the app, so a stale link survives
+until you do. `tools/make-icon.swift` regenerates the application icon if you
+want a different color scheme; it draws with Core Graphics, no image generation.
+
 ## Contributing
 
 Issues and pull requests are welcome, but this is a personal project with no
