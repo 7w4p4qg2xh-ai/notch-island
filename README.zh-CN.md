@@ -36,6 +36,16 @@
 
 ---
 
+## 截图
+
+通知卡：系统横幅不再出现，改由灵动岛自己绘制：
+
+<img src="docs/screenshots/notification.jpg" alt="灵动岛里的通知卡">
+
+音乐卡与当前歌词行（在没有刘海的显示器上）：
+
+<img src="docs/screenshots/music-lyrics.png" alt="音乐卡与逐行歌词">
+
 ## 环境要求
 
 - macOS 26 (Tahoe) 及以上
@@ -66,7 +76,7 @@ open boringNotch.xcodeproj
 macOS 不会告诉你缺了什么。来通知了岛上却没反应，按这个顺序查：
 
 1. **系统设置 → 隐私与安全性 → 屏幕录制**：勾上 Notch Island，然后**退出程序重新打开**。权限要重启才生效。
-2. **系统设置 → 隐私与安全性 → 辅助功能**：勾上 Notch Island。helper 靠它读横幅文字。
+2. **系统设置 → 隐私与安全性 → 辅助功能**：勾上 Notch Island。helper 靠它读横幅文字。**如果列表里找不到 Notch Island，点下方的 `+`，从「应用程序」里手动添加**——macOS 只列出主动请求过该权限的程序，旧版本从来没请求过。
 3. **系统设置 → 通知**：先确认发通知的那个应用本身允许通知。
 
 ---

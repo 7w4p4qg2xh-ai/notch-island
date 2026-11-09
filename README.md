@@ -59,6 +59,16 @@ deliberately *not* copied from Apple.
 
 ---
 
+## Screenshots
+
+Notification card — the system banner is gone, the island draws it instead:
+
+<img src="docs/screenshots/notification.jpg" alt="Notification card rendered inside the island">
+
+Music card with the current lyric line, on a display without a notch:
+
+<img src="docs/screenshots/music-lyrics.png" alt="Music card with synchronized lyrics and glass capsule">
+
 ## Requirements
 
 - macOS 26 (Tahoe) or later
@@ -99,7 +109,9 @@ notification arrives, check in this order:
    Island, then quit and relaunch the app. The permission only applies after a
    relaunch.
 2. **System Settings -> Privacy & Security -> Accessibility** — enable Notch
-   Island. The helper needs it to read banner text.
+   Island. The helper needs it to read banner text. **If Notch Island is not in
+   the list, click `+` and add it from `/Applications`** — macOS only lists apps
+   that have asked for the permission, and older builds never asked.
 3. **System Settings -> Notifications** — make sure notifications are allowed for
    the source app at all.
 
