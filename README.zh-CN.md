@@ -1,5 +1,9 @@
 # Notch Island
 
+[![Release](https://img.shields.io/github/v/release/7w4p4qg2xh-ai/notch-island?style=flat-square)](https://github.com/7w4p4qg2xh-ai/notch-island/releases)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%2026%2B-lightgrey?style=flat-square)](#环境要求)
+
 [Boring Notch](https://github.com/TheBoredTeam/boring.notch) 的个人改版：把通知真正搬进刘海、增加蓝牙外设电量、自研液态玻璃材质，并给没有刘海的显示器一个悬浮灵动岛。
 
 > **这是非官方 fork。** 与 The Bored Team 没有任何隶属关系，未获其背书，也不由其提供支持。问题请提到本仓库，不要提到上游。GPLv3 要求的修改声明见 [NOTICE](NOTICE)。

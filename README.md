@@ -1,5 +1,9 @@
 # Notch Island
 
+[![Release](https://img.shields.io/github/v/release/7w4p4qg2xh-ai/notch-island?style=flat-square)](https://github.com/7w4p4qg2xh-ai/notch-island/releases)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%2026%2B-lightgrey?style=flat-square)](#requirements)
+
 A fork of [Boring Notch](https://github.com/TheBoredTeam/boring.notch) that adds
 an honest notification island, a Bluetooth battery indicator, a hand-built Liquid
 Glass surface, and a floating island presentation for external displays.
