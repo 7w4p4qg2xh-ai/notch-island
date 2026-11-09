@@ -1,0 +1,72 @@
+name: Bug report
+description: Something in the island does not behave as described
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is an **unofficial fork** of Boring Notch, maintained by one person
+        with no support commitment. If the problem also happens with the
+        official build, please report it
+        [upstream](https://github.com/TheBoredTeam/boring.notch/issues) instead.
+
+        Most "nothing happens" reports turn out to be a missing permission.
+        Check Screen Recording and Accessibility first, then relaunch the app.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Settings -> About, or the output of `git rev-parse --short HEAD`.
+    validations:
+      required: true
+
+  - type: input
+    id: operating-system
+    attributes:
+      label: macOS version
+      placeholder: "26.1 (25B78)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: display
+    attributes:
+      label: Display setup
+      description: The floating island only exists on displays without a notch.
+      options:
+        - Built-in notch display only
+        - External display only
+        - Built-in notch display plus one external
+        - Two or more external displays
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: permissions
+    attributes:
+      label: Permissions granted to the app
+      options:
+        - label: Screen Recording (needed for backdrop-aware glass)
+        - label: Accessibility (needed for notification capture)
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did you see, and did the app relaunch since?
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots or logs
+      description: |
+        A screenshot of the island is worth more than a paragraph. Console.app
+        filtered by subsystem `com.notchisland.app` has the runtime log.

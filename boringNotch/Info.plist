@@ -2,8 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>BNUpdateChannel</key>
+	<string>stable</string>
 	<key>CFBundleAllowMixedLocalizations</key>
 	<true/>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Notch Island analyzes audio from your music app to draw a real-time waveform in the notch. Audio is processed locally and never leaves your Mac.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Notch Island samples the brightness of what is behind the island to adapt the Liquid Glass material (Apple's clear-glass rule). Only a tiny, downsampled image is read in memory; nothing is recorded, saved, or transmitted.</string>
 	<key>SUBundleName</key>
 	<string>Notch Island</string>
 	<key>SUEnableAutomaticChecks</key>
@@ -12,12 +18,6 @@
 	<false/>
 	<key>SUEnableInstallerLauncherService</key>
 	<false/>
-	<key>NSAudioCaptureUsageDescription</key>
-	<string>Notch Island analyzes audio from your music app to draw a real-time waveform in the notch. Audio is processed locally and never leaves your Mac.</string>
-	<key>NSScreenCaptureUsageDescription</key>
-	<string>Notch Island samples the brightness of what is behind the island to adapt the Liquid Glass material (Apple's clear-glass rule). Only a tiny, downsampled image is read in memory; nothing is recorded, saved, or transmitted.</string>
-	<key>BNUpdateChannel</key>
-	<string>stable</string>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict/>

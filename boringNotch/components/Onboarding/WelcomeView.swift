@@ -59,8 +59,10 @@ struct WelcomeView: View {
                 .padding(.top)
             }
 
-            Image("theboringteam")
-                .resizable().scaledToFit()
+            // Upstream team logo removed in this fork: shipping it would imply
+            // the original authors endorse this distribution. Kept as a
+            // spacer so the onboarding layout is unchanged.
+            Color.clear
                 .frame(height: 22)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 .padding()

@@ -42,7 +42,7 @@ struct BoringExtrasMenu: View {
     var github: some View {
         BoringLargeButtons(
             action: {
-                if let url = URL(string: "https://github.com/TheBoredTeam/boring.notch") {
+                if let url = URL(string: "https://github.com/OWNER/notch-island") {
                     NSWorkspace.shared.open(url)
                 }
             },
