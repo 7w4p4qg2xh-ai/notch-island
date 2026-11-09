@@ -37,7 +37,10 @@ one never moves the other.
 - **A glass lyric strip.** While music plays, a 320×26 capsule hangs *below* the
   notch with the current line — the cutout itself has no pixels, so text cannot
   live inside it.
-- **Liquid Glass on the open plate**, measured against Apple's own material.
+- **The collapsed plate stays pure black, on purpose.** Only pure black fuses
+  with the camera housing; glass there reads as a sticker pasted over the notch.
+- **Now-playing is left to upstream.** The built-in display keeps its original
+  `MusicLiveActivity`; only the floating island gets the new card.
 
 ### Displays without a notch
 
@@ -48,6 +51,9 @@ one never moves the other.
 - **Adjustable geometry** — card width, panel size and corner radius are sliders
   under *Notch > Floating island*, with a reset button.
 - **Suppresses itself when idle**, while full-screen notifications keep working.
+- **Video sources don't raise a now-playing card.** The decision follows the
+  playback source, not full-screen state, so a video app playing in a window is
+  treated the same as one in full screen. Real music is unaffected.
 
 ### Both
 
