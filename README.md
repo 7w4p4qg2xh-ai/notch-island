@@ -24,35 +24,43 @@ code, not releases. Build it yourself, it takes about five minutes.
 
 ## What it changes
 
-**Notifications live in the island.** The native banner is parked off-screen and
-the notification is re-rendered inside the island: a compact bar when collapsed,
-a two-line Apple-style card on hover, with app icons resolved through a
-multi-path fallback chain. Auto-expand, click actions and replies are mirrored
-into the island.
+Two display types, two separate code paths, selected per `screenUUID`. Changing
+one never moves the other.
 
-**Liquid Glass instead of a black plate.** The plate is a real
-`CABackdropLayer` -> `CASDFLayer` -> `CAFilter("glassBackground")` pipeline with
-edge lensing and a flat center, following Apple's own `NSGlassEffectView`
-measurements. It samples the actual luminance behind the island through
-ScreenCaptureKit, so a black window behind it produces an edge-lit transparent
-surface rather than an unreadable grey slab.
+### Built-in notch display
 
-**External displays get a floating island.** Displays without a notch no longer
-get a static black rectangle glued to the top edge. They get a 408 x 66 card that
-grows into a 480 x 150 panel, with `Capsule` corners that follow the plate height.
-The built-in notch display is untouched.
+- **Notifications are captured, not mirrored.** The system banner is parked
+  off-screen and re-drawn under the camera cutout: auto-expand, a two-line card,
+  app icons resolved through a multi-path fallback chain, click actions and
+  replies mirrored back. The plate keeps the 520×132 proportions upstream tuned
+  around the cutout.
+- **A glass lyric strip.** While music plays, a 320×26 capsule hangs *below* the
+  notch with the current line — the cutout itself has no pixels, so text cannot
+  live inside it.
+- **Liquid Glass on the open plate**, measured against Apple's own material.
 
-**Bluetooth peripheral battery.** Paired headphones, mice and keyboards show up
-as a compact indicator when they are running low.
+### Displays without a notch
 
-**Synchronized lyrics.** LRCLIB time-synced lyrics first, NetEase as a fallback,
-plain text last. Upstream tried AppleScript plain text first and returned early,
-which made the synced path unreachable.
+- **The floating island.** Instead of a static black rectangle glued to the top
+  edge: a 408×66 card that grows into a 480×150 panel, with `Capsule` corners
+  that follow the plate height.
+- **Glass even when collapsed** — the idle capsule is translucent, not black.
+- **Adjustable geometry** — card width, panel size and corner radius are sliders
+  under *Notch > Floating island*, with a reset button.
+- **Suppresses itself when idle**, while full-screen notifications keep working.
 
-**Adjustable geometry.** Card width, panel size and corner radius are sliders
-under *Notch > Floating island*, with a reset button. Only displays without a
-notch are tunable — the built-in notch display keeps its measured sizes, because
-the plate has to line up with the physical cutout.
+### Both
+
+- **Liquid Glass renderer.** `CABackdropLayer` → `CASDFLayer` →
+  `CAFilter("glassBackground")`, edge lensing with a flat centre, following
+  Apple's `NSGlassEffectView` measurements.
+- **Backdrop-aware.** Samples the luminance actually behind the plate through
+  ScreenCaptureKit, so a black window behind it produces edge-lit transparency
+  rather than a grey slab.
+- **Synchronized lyrics.** LRCLIB time-synced first, NetEase fallback, plain text
+  last. Upstream tried AppleScript plain text first and returned early, which made
+  the synced path unreachable.
+- **Bluetooth peripheral battery** for headphones, mice and keyboards.
 
 See [CHANGES.md](CHANGES.md) for the full breakdown including the parts that are
 deliberately *not* copied from Apple.
@@ -60,6 +68,8 @@ deliberately *not* copied from Apple.
 ---
 
 ## Screenshots
+
+Both shots are from the built-in notch display.
 
 Notification card — the system banner is gone, the island draws it instead:
 
