@@ -41,6 +41,11 @@ as a compact indicator when they are running low.
 plain text last. Upstream tried AppleScript plain text first and returned early,
 which made the synced path unreachable.
 
+**Adjustable geometry.** Card width, panel size and corner radius are sliders
+under *Notch > Floating island*, with a reset button. Only displays without a
+notch are tunable — the built-in notch display keeps its measured sizes, because
+the plate has to line up with the physical cutout.
+
 See [CHANGES.md](CHANGES.md) for the full breakdown including the parts that are
 deliberately *not* copied from Apple.
 
