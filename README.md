@@ -4,6 +4,10 @@
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2026%2B-lightgrey?style=flat-square)](#requirements)
 
+<p align="center">
+  <img src="docs/banner.png" alt="Notch Island — Liquid Glass notifications for the macOS notch">
+</p>
+
 A fork of [Boring Notch](https://github.com/TheBoredTeam/boring.notch) that adds
 an honest notification island, a Bluetooth battery indicator, a hand-built Liquid
 Glass surface, and a floating island presentation for external displays.
