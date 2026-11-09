@@ -465,7 +465,7 @@ extension Defaults.Keys {
     /// notch keeps its closed pill pure black so it blends into the camera
     /// housing; the floating island on a notch-less display uses glass in the
     /// closed state too (`closedPillUsesGlass` in ContentView).
-    static let enableLiquidGlass = Key<Bool>("enableLiquidGlass", default: false)
+    static let enableLiquidGlass = Key<Bool>("enableLiquidGlass", default: true)
     /// `true` uses the clear "crystal" glass, `false` the regular frosted one.
     /// Crystal is the default: the frosted style reads as a grey plate on a
     /// dark wallpaper, which is the opposite of what Liquid Glass is for.
@@ -493,7 +493,7 @@ extension Defaults.Keys {
     /// Enforce Apple's *clear* gate: clear glass over bright content needs a
     /// ~35% black darkening layer. Off by default because the user has asked
     /// for maximum transparency; the switch exists to be conforming on demand.
-    static let glassAdaptiveScrim = Key<Bool>("glassAdaptiveScrim", default: false)
+    static let glassAdaptiveScrim = Key<Bool>("glassAdaptiveScrim", default: true)
     /// Apple's material continuously reads what is *actually* behind the glass.
     /// The wallpaper is a poor stand-in: a black window dragged under the island
     /// leaves `DesktopLuminance` at 0.440 and the clear-glass dimming layer on,
@@ -522,11 +522,11 @@ extension Defaults.Keys {
     // MARK: Media playback
     static let coloredSpectrogram = Key<Bool>("coloredSpectrogram", default: true)
     static let realtimeAudioWaveform = Key<Bool>("realtimeAudioWaveform", default: false)
-    static let enableSneakPeek = Key<Bool>("enableSneakPeek", default: false)
+    static let enableSneakPeek = Key<Bool>("enableSneakPeek", default: true)
     static let sneakPeekStyles = Key<SneakPeekStyle>("sneakPeekStyles", default: .standard)
     static let waitInterval = Key<Double>("waitInterval", default: 3)
     static let showShuffleAndRepeat = Key<Bool>("showShuffleAndRepeat", default: false)
-    static let enableLyrics = Key<Bool>("enableLyrics", default: false)
+    static let enableLyrics = Key<Bool>("enableLyrics", default: true)
     /// 11-08 用户：「Mac 自己屏幕放音乐没有办法显示歌词」「加上一个显示歌词的开关，
     /// 然后用液态玻璃显示歌词，不要上下太宽」。
     /// 只作用于硬件刘海屏：收起态中间是物理摄像头切口，不能写字，
@@ -572,7 +572,7 @@ extension Defaults.Keys {
 
     // MARK: Notifications
     /// Off by default: mirroring banners needs Accessibility access.
-    static let notificationLiveActivity = Key<Bool>("notificationLiveActivity", default: false)
+    static let notificationLiveActivity = Key<Bool>("notificationLiveActivity", default: true)
     static let notificationsFromAllApps = Key<Bool>("notificationsFromAllApps", default: false)
     static let notificationAllowedApps = Key<Set<String>>(
         "notificationAllowedApps",
