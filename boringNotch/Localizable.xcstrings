@@ -32526,6 +32526,116 @@
           }
         }
       }
+    },
+    "Floating island" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "浮岛"
+          }
+        }
+      }
+    },
+    "Card width" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "卡片宽度"
+          }
+        }
+      }
+    },
+    "Panel width" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "面板宽度"
+          }
+        }
+      }
+    },
+    "Panel height" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "面板高度"
+          }
+        }
+      }
+    },
+    "Corner radius" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "圆角"
+          }
+        }
+      }
+    },
+    "Glass capsule while collapsed" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "收起时胶囊也使用玻璃"
+          }
+        }
+      }
+    },
+    "Show now-playing card" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示「正在播放」卡片"
+          }
+        }
+      }
+    },
+    "Reset island sizes" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复默认尺寸"
+          }
+        }
+      }
+    },
+    "Applies to displays without a notch. The built-in notch display keeps its original size." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅对没有刘海的显示器生效，内建刘海屏保持原尺寸。"
+          }
+        }
+      }
+    },
+    "Hide the island when idle" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无刘海显示器：空闲时不显示浮岛"
+          }
+        }
+      }
+    },
+    "Enable the floating island (notifications, music, panel)" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无刘海显示器：启用悬浮灵动岛（通知 / 音乐 / 面板）"
+          }
+        }
+      }
     }
   },
   "version" : "1.1"

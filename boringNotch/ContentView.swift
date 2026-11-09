@@ -68,6 +68,16 @@ struct ContentView: View {
     /// Same reasoning as above: flipping it must redraw the plate at once.
     @Default(.floatingPillOnNonNotchDisplay) var floatingPillOnNonNotch
 
+    // 浮岛几何（11-09）：设置页拖动滑块要立刻重排版面，所以同样必须是
+    // `@Default` 而不是 body 里现读 —— `Defaults[...]` 不是响应式的，
+    // 用它做尺寸会让滑块拖完整页不动，直到窗口重建。
+    @Default(.islandCardWidth) var islandCardWidthSetting
+    @Default(.islandCardCornerRadius) var islandCardCornerRadiusSetting
+    @Default(.islandPanelWidth) var islandPanelWidthSetting
+    @Default(.islandPanelHeight) var islandPanelHeightSetting
+    @Default(.closedPillGlassEnabled) var closedPillGlassEnabled
+    @Default(.islandMusicCardEnabled) var islandMusicCardEnabled
+
     // Use standardized animations from StandardAnimations enum
     private let animationSpring = StandardAnimations.interactive
 
@@ -147,7 +157,8 @@ struct ContentView: View {
     /// 185×24 capsule. Gated on `usesFloatingIsland` so the built-in notched
     /// display keeps its original music live activity untouched.
     private var showsMusicCard: Bool {
-        guard usesFloatingIsland,
+        guard islandMusicCardEnabled,
+              usesFloatingIsland,
               allowsNowPlayingCard,
               vm.notchState == .closed,
               !vm.hideOnClosed,
@@ -215,7 +226,7 @@ struct ContentView: View {
     /// only ~66pt tall and drops to ~16 via `NotchShape.cornerHeightRatio`
     /// (0.24·h, Apple's own ratio). Forcing 36 there made SwiftUI squeeze the
     /// corner into a 1.53:1 ellipse instead of a circle.
-    private var islandCardRadius: CGFloat { 36 }
+    private var islandCardRadius: CGFloat { CGFloat(islandCardCornerRadiusSetting) }
 
     /// Apple HIG "Live Activities" gives iPadOS cards 425–500pt and macOS
     /// (which reuses the iOS sizes) 371–408pt, with heights of 84–160pt. The
@@ -235,7 +246,9 @@ struct ContentView: View {
     /// content was CENTRED, leaving dead glass either side — see docs/04 L8.
     /// Content hangs off the left edge now, so width reads as information,
     /// not emptiness.)
-    private var islandCardWidth: CGFloat { 408 }
+    /// 11-09: 408 现在是默认值，实际宽度来自设置页
+    /// （`islandCardWidth` 键，默认 408，范围 340…560）。
+    private var islandCardWidth: CGFloat { CGFloat(islandCardWidthSetting) }
     private var islandNotificationSize: CGSize {
         // Apple's standard two-line banner measures ~66pt tall on the 11-07
         // screenshot (42pt leading icon + 12pt above/below), which is what
@@ -249,7 +262,11 @@ struct ContentView: View {
         // content y=7.5 inside an 84pt card with ~23pt below it).
         CGSize(width: islandCardWidth, height: 0)
     }
-    private var islandPanelSize: CGSize { CGSize(width: 480, height: 150) }
+    /// 11-09: 480×150 现在是默认值，实际尺寸来自设置页。
+    /// 高度下限 120 是有意的 —— 再矮会裁掉面板里的播放控件。
+    private var islandPanelSize: CGSize {
+        CGSize(width: islandPanelWidthSetting, height: islandPanelHeightSetting)
+    }
 
     /// 11-07: music gets its own size, cloned from the NOTIFICATION card
     /// rather than the hand-opened 480×150 player. The user asked for the
@@ -601,7 +618,7 @@ struct ContentView: View {
     /// because the capsule is small and a heavy wash would read as black
     /// again (user: "黑底改玻璃", 20:36).
     private var closedPillUsesGlass: Bool {
-        usesFloatingIsland && Defaults[.enableLiquidGlass]
+        usesFloatingIsland && Defaults[.enableLiquidGlass] && closedPillGlassEnabled
     }
 
     private var closedPillScrim: Double {

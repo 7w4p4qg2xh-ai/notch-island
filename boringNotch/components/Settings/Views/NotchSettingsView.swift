@@ -22,9 +22,16 @@ struct NotchSettingsView: View {
     @Default(.enableOpeningAnimation) var enableOpeningAnimation
     @Default(.animationSpeedMultiplier) var animationSpeedMultiplier
 
+    // 浮岛尺寸（11-09）。这四个值原先写死在 ContentView 里，外接屏上没法调。
+    @Default(.islandCardWidth) var islandCardWidth
+    @Default(.islandCardCornerRadius) var islandCardCornerRadius
+    @Default(.islandPanelWidth) var islandPanelWidth
+    @Default(.islandPanelHeight) var islandPanelHeight
+
     var body: some View {
         Form {
             sizingSection
+            islandSizingSection
             behaviorSection
             gesturesSection
             windowSection
@@ -121,13 +128,68 @@ struct NotchSettingsView: View {
                 }
             }
             Defaults.Toggle(key: .hideIdlePlateOnNonNotch) {
-                Text("无刘海显示器：空闲时不显示浮岛")
+                Text("Hide the island when idle")
             }
             Defaults.Toggle(key: .floatingPillOnNonNotchDisplay) {
-                Text("无刘海显示器：启用悬浮灵动岛（通知 / 音乐 / 面板）")
+                Text("Enable the floating island (notifications, music, panel)")
             }
         } header: {
             Text("Sizing")
+        }
+    }
+
+    /// 浮岛尺寸（11-09）。只对「没有刘海的显示器」生效 —— 内建刘海屏的
+    /// 通知卡 / 面板尺寸是另一套写死的值，故意不暴露，免得改坏硬件开孔的对齐。
+    private var islandSizingSection: some View {
+        Section {
+            islandSizeSlider(
+                "Card width", value: $islandCardWidth, range: 340...560, step: 2)
+            islandSizeSlider(
+                "Panel width", value: $islandPanelWidth, range: 400...720, step: 5)
+            islandSizeSlider(
+                "Panel height", value: $islandPanelHeight, range: 120...300, step: 5)
+            islandSizeSlider(
+                "Corner radius", value: $islandCardCornerRadius, range: 14...44, step: 1)
+
+            Defaults.Toggle(key: .closedPillGlassEnabled) {
+                Text("Glass capsule while collapsed")
+            }
+            Defaults.Toggle(key: .islandMusicCardEnabled) {
+                Text("Show now-playing card")
+            }
+
+            Button("Reset island sizes") {
+                islandCardWidth = 408
+                islandPanelWidth = 480
+                islandPanelHeight = 150
+                islandCardCornerRadius = 36
+            }
+        } header: {
+            Text("Floating island")
+        } footer: {
+            Text(
+                "Applies to displays without a notch. The built-in notch display keeps its original size."
+            )
+        }
+    }
+
+    /// 标签一行、滑块一行。数值单独画在右侧，这样本地化只需要翻译标题，
+    /// 不用为「标题 + 数字」拼一个带占位符的 key。
+    private func islandSizeSlider(
+        _ title: LocalizedStringKey,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        step: Double
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text("\(Int(value.wrappedValue)) pt")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: value, in: range, step: step)
         }
     }
 

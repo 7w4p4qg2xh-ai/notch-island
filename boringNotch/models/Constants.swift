@@ -644,6 +644,28 @@ extension Defaults.Keys {
     /// 11-08 起与 `hideIdlePlateOnNonNotch` 不再互斥 —— 旧版设置页强制把两者
     /// 归一化成「常驻胶囊」，是空闲浮岛关不掉的历史原因（docs/04 J3）。
     static let floatingPillOnNonNotchDisplay = Key<Bool>("floatingPillOnNonNotchDisplay", default: true)
+
+    // MARK: - 浮岛尺寸（可调，11-09）
+    //
+    // 这组值原先写死在 ContentView 里，外接屏上一律用同一组数字，用户只能改
+    // 「刘海条高度」却改不了卡片宽窄。这里提成配置键，设置页给滑块。
+    //
+    // 下限不是拍脑袋：音乐卡的文字列 = 宽度 − 14(leading) − 42(封面) − 10(gap)
+    // − 14(trailing) = 宽度 − 80，340 时列宽 260，再窄两行文字就会折行。
+
+    /// 浮岛通知卡 / 音乐卡宽度。
+    static let islandCardWidth = Key<Double>("islandCardWidth", default: 408)
+    /// 浮岛卡片圆角上限。实际圆角仍被 NotchShape 的 `0.24 · 高度` 钳制，
+    /// 所以调大只对足够高的面板生效，矮卡片不会被拉成椭圆角。
+    static let islandCardCornerRadius = Key<Double>("islandCardCornerRadius", default: 36)
+    /// 手点开的面板宽度。
+    static let islandPanelWidth = Key<Double>("islandPanelWidth", default: 480)
+    /// 手点开的面板高度。低于 120 会裁掉播放器控件，所以下限卡在 120。
+    static let islandPanelHeight = Key<Double>("islandPanelHeight", default: 150)
+    /// 收起胶囊是否也用液态玻璃（仅浮岛；内建刘海屏始终纯黑，不可调）。
+    static let closedPillGlassEnabled = Key<Bool>("closedPillGlassEnabled", default: true)
+    /// 播放音乐时是否在浮岛上显示「正在播放」卡。
+    static let islandMusicCardEnabled = Key<Bool>("islandMusicCardEnabled", default: true)
     /// v2 of the one-shot `preferred_screen_uuid` repair. v1 marked itself done
     /// even when the repair never ran (e.g. only one display online at launch),
     /// so the baked-in UUID survived forever. v2 only marks itself when it
