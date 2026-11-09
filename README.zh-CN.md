@@ -42,7 +42,7 @@
 
 <img src="docs/screenshots/notification.jpg" alt="灵动岛里的通知卡">
 
-音乐卡与当前歌词行（在没有刘海的显示器上）：
+音乐卡与当前歌词行，随播放进度推进：
 
 <img src="docs/screenshots/music-lyrics.png" alt="音乐卡与逐行歌词">
 

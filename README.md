@@ -65,7 +65,7 @@ Notification card — the system banner is gone, the island draws it instead:
 
 <img src="docs/screenshots/notification.jpg" alt="Notification card rendered inside the island">
 
-Music card with the current lyric line, on a display without a notch:
+Music card with the current lyric line advancing as the track plays:
 
 <img src="docs/screenshots/music-lyrics.png" alt="Music card with synchronized lyrics and glass capsule">
 
