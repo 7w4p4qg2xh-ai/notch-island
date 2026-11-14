@@ -500,11 +500,11 @@ struct NotchSurfaceBackground: View {
                     .animation(.easeOut(duration: 0.2), value: scrimOpacity)
                 if clearGlass, !reduceTransparency {
                     // WWDC25 219 "Principles": highlights and shadow are
-                    // *intrinsic* layers of the material, not a dark-mode
-                    // patch. Keeping them in the tree at a low baseline also
-                    // means a revoked Screen Recording permission can no
-                    // longer leave the card as white type on nothing
-                    // (reported 11-14).
+                    // separate layers of the material, not a dimming veil.
+                    // The stack stays in the tree so its strength can ramp
+                    // continuously with the sampled backdrop; at strength 0
+                    // it is fully transparent and the approved bright-backdrop
+                    // look is untouched.
                     glassSurfaceHighlights
                 }
             }
@@ -690,19 +690,26 @@ struct NotchSurfaceBackground: View {
     private var darkBackdropStrength: Double {
         guard glassIsActive, clearGlass, !reduceTransparency else { return 0 }
         guard let luma = sampledLuma else { return 0 }
-        // The upper bound matches the scrim's "bright" gate, so the face and
-        // the wash can never disagree about whether the backdrop is dark.
-        let t = (luma - 0.22) / (0.45 - 0.22)
+        // This machine's normal wallpaper measures ~0.365, and a rich
+        // wallpaper is exactly where HIG says clear glass belongs. The
+        // treatment must be completely gone by then, so the ramp ends at
+        // 0.32 — NOT at the scrim's 0.45 "bright" gate: that one is about
+        // dimming *bright* content for legibility, a different question.
+        let t = (luma - 0.22) / (0.32 - 0.22)
         return 1 - min(max(t, 0), 1)
     }
 
-    /// The specular edge is intrinsic to the glass, so it never disappears.
-    /// On a bright backdrop lensing defines the shape and only a faint edge is
-    /// needed; on black it becomes the main depth cue. The baseline also
-    /// covers a revoked Screen Recording permission, where `sampledLuma` is
-    /// nil — that case must no longer degrade to "white type on nothing".
+    /// On a bright / rich backdrop the glass already defines itself by
+    /// lensing and the filter's own key-fill highlight, so strength 0 leaves
+    /// the entire sibling stack transparent: the look the user approved is
+    /// unchanged, with no extra outline on the wallpaper.
+    ///
+    /// When Screen Recording is revoked there is no sample to trust, so keep
+    /// a faint outline instead of degrading to "white type on nothing" (P5's
+    /// old fallback, explicitly rejected on 11-14). Only the *wash* needs a
+    /// real measurement; a specular edge is safe to draw unconditionally.
     private var rimStrength: Double {
-        0.22 + 0.78 * darkBackdropStrength
+        sampledLuma == nil ? 0.25 : darkBackdropStrength
     }
 
     /// A *light* wash, never another black scrim. The 11-08 "grey slab" came
