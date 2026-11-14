@@ -536,6 +536,11 @@ struct NotchSurfaceBackground: View {
         if enabled, !didAcquireSampling {
             didAcquireSampling = true
             BackdropLuminance.acquire()
+            // A notification wakes the floating island from a fully hidden
+            // state. Reuse the last real sample instead of waiting ~0.7s for
+            // the next tick: that empty interval used to fall back to the
+            // wallpaper proxy and flash a black scrim (docs/04 P7).
+            if let cached = BackdropLuminance.current { backdropLuma = cached }
         } else if !enabled, didAcquireSampling {
             didAcquireSampling = false
             backdropLuma = nil
@@ -618,18 +623,31 @@ struct NotchSurfaceBackground: View {
         // wallpaper alone is not enough).
         let realLuma = backdropSampling ? backdropLuma : nil
         let wallpaperLuma = adaptiveScrim ? DesktopLuminance.average(for: screenUUID) : nil
-        let luminance = realLuma ?? wallpaperLuma
+        // 🔴 While real sampling is enabled but has not produced its first
+        // frame, the wallpaper proxy must NOT take over: on this machine it
+        // reads 0.440 while the actual content behind the island is a dark
+        // window (docs/04 P3), which instantly triggers the 35% black wash —
+        // the "black popup" reported 11-14 at notification onset.
+        let luminance = realLuma ?? (backdropSampling ? nil : wallpaperLuma)
 
         var value = darkness
 
         if let luminance {
             if luminance <= 0.22 {
                 // Dark backdrop: no *automatic* dimming layer at all. White type
-                // is already legible and the rim highlight must stay intact to
-                // draw the glass edge. The user's own darkness dial is never
-                // overridden — `value` stays exactly `darkness` here.
+                // is already legible and the edge highlights must stay intact.
+                // The user's own darkness dial is never overridden here.
             } else {
-                value = max(value, minimumScrim)
+                // 🔴 Continuous, not a step. The old `max(value, minimumScrim)`
+                // jumped straight to 0.35 black the moment a smoothed sample
+                // crept above 0.22; this machine's dark UI measures 0.166–0.216,
+                // so a single frame over the threshold slapped a black slab
+                // over the card and pressed the specular edge down with it.
+                // Same 0.22→0.32 ramp as `darkBackdropStrength`: at 0.365 (the
+                // normal wallpaper) `warm == 1`, so the approved bright-
+                // backdrop look is unchanged.
+                let warm = min(max((luminance - 0.22) / 0.10, 0), 1)
+                value = max(value, minimumScrim * warm)
                 if luminance > 0.62 {
                     value = max(value, 0.35)
                 } else if luminance > 0.45 {
@@ -637,9 +655,10 @@ struct NotchSurfaceBackground: View {
                 }
             }
         } else {
-            // No usable measurement: keep the old guaranteed floor so white
-            // type on a bright window never becomes unreadable.
-            value = max(value, minimumScrim)
+            // Sampling enabled but no frame yet: a short, light floor keeps
+            // white type readable for the ~0.7s warm-up without turning the
+            // card into a solid black slab.
+            value = max(value, minimumScrim * 0.2)
         }
 
         // Apple's "Increase Contrast" makes the material materially more
@@ -665,8 +684,8 @@ struct NotchSurfaceBackground: View {
         backdropSampling ? backdropLuma : nil
     }
 
-    /// 0…1 strength of Apple's adaptive ("Tinted") response to a dark
-    /// backdrop.
+    /// 0…1 strength of the dark-backdrop **edge** treatment. The centre is
+    /// never touched — see `glassSurfaceHighlights`.
     ///
     /// WWDC25 219 (13:13): *clear* Liquid Glass "does not have adaptive
     /// behaviors" — it stays permanently transparent and belongs only over
@@ -678,9 +697,10 @@ struct NotchSurfaceBackground: View {
     ///
     /// We deliberately leave the clear *pipeline* untouched — mixing the two
     /// parameter sets is what made regular read as "the same glass smudged"
-    /// (docs/04 C12). Instead we supply the adaptive layers Apple describes
-    /// as separate siblings: a light face wash, a specular band, a ring
-    /// shadow and a specular rim. Clear glass on black is a material vacuum:
+    /// (docs/04 C12). Instead we supply Apple's highlights / shadow layers
+    /// as sibling strokes hugging the outline. A uniform face wash was tried
+    /// here on 11-14 and rejected: it is frosted glass, not Liquid Glass
+    /// (docs/04 P7). Clear glass on black is a material vacuum:
     /// there is nothing to refract, HIG forbids a dimming layer, and the dark
     /// branch zeroes the face layers (docs/04 P5), so these layers are the
     /// only thing that can define the object's silhouette.
@@ -712,59 +732,90 @@ struct NotchSurfaceBackground: View {
         sampledLuma == nil ? 0.25 : darkBackdropStrength
     }
 
-    /// A *light* wash, never another black scrim. The 11-08 "grey slab" came
-    /// from three darkening layers stacked together; lifting a dark backdrop
-    /// slightly is the transparent equivalent of Apple's Tinted look and
-    /// cannot collapse back into that slab (docs/04 P1).
-    private var faceWashOpacity: Double {
-        0.09 * darkBackdropStrength
-    }
-
-    /// No `.blendMode`, `.shadow` or `.mask` anywhere in here: each forces an
-    /// offscreen pass and a backdrop layer has no window server to sample in
-    /// one (docs/04 C8 / P5). Plain `fill` / `stroke` gradients composite as
-    /// sibling layers and leave the glass untouched.
+    /// The centre of a Liquid Glass element is a **pure window**. What makes
+    /// it read as glass is the lensed, lit edge — never a uniform tint over
+    /// the whole plate. A uniform wash (or a blur) is the definition of
+    /// frosted glass / glassmorphism, which is exactly what the first 11-14
+    /// attempt produced (user: "像一个磨砂玻璃…根本不像液态玻璃").
+    ///
+    /// WWDC25 219, 1:55: "The primary way Liquid Glass visually defines
+    /// itself is through Lensing"; 10:44 the highlights layer is "light
+    /// sources ... shine on the material ... defining its silhouette".
+    /// Apple's specular highlights are built from inner shadows and gradient
+    /// overlays that follow the outline — never a flat face fill.
+    ///
+    /// So every layer below is a `stroke` hugging the outline, from a wide
+    /// faint glow down to a crisp hairline. Nothing fills the centre: the
+    /// dark window behind stays visible *through* the card.
+    ///
+    /// No `.blendMode`, `.shadow`, `.mask` or `.clipShape` anywhere in here:
+    /// each forces an offscreen pass and a backdrop layer has no window
+    /// server to sample in one (docs/04 C8 / P5).
     @ViewBuilder
     private var glassSurfaceHighlights: some View {
         ZStack {
-            // 1. Adaptive face — the "Tinted" half of Apple's adaptivity.
-            //    Only appears on genuinely dark content, uniformly, so it
-            //    cannot read as a second material (docs/04 C3).
-            shape.fill(Color.white.opacity(faceWashOpacity))
-
-            // 2. Specular band: light from above catching the thickness of the
-            //    slab, plus a faint reflected glint at the bottom edge.
-            shape.fill(
-                LinearGradient(
-                    stops: [
-                        .init(color: .white.opacity(0.14 * darkBackdropStrength), location: 0.0),
-                        .init(color: .white.opacity(0.02 * darkBackdropStrength), location: 0.26),
-                        .init(color: .clear, location: 0.60),
-                        .init(color: .white.opacity(0.05 * darkBackdropStrength), location: 1.0)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-
-            // 3. Ring shadow — the shadow layer WWDC describes as what lifts
-            //    glass off its backdrop. A stroke, not `.shadow`.
-            shape.stroke(Color.black.opacity(0.45 * rimStrength), lineWidth: 2.5)
-
-            // 4. Specular rim: brightest along the top, dim at the sides,
-            //    with a weaker reflected line along the bottom.
+            // 1. Broad, faint environmental glow — light spilling off the
+            //    edge. Wide + low alpha so it fades instead of reading as a
+            //    second border.
             shape.stroke(
                 LinearGradient(
                     stops: [
-                        .init(color: .white.opacity(0.65 * rimStrength), location: 0.0),
-                        .init(color: .white.opacity(0.16 * rimStrength), location: 0.42),
-                        .init(color: .white.opacity(0.07 * rimStrength), location: 0.80),
-                        .init(color: .white.opacity(0.28 * rimStrength), location: 1.0)
+                        .init(color: .white.opacity(0.10 * rimStrength), location: 0.0),
+                        .init(color: .white.opacity(0.025 * rimStrength), location: 0.50),
+                        .init(color: .white.opacity(0.05 * rimStrength), location: 1.0)
                     ],
                     startPoint: .top,
                     endPoint: .bottom
                 ),
-                lineWidth: 1.25
+                lineWidth: 10
+            )
+
+            // 2. Lens band: light concentrated by the curved edge. Bright on
+            //    top where the key light lands, with a weak reflected line
+            //    along the bottom.
+            shape.stroke(
+                LinearGradient(
+                    stops: [
+                        .init(color: .white.opacity(0.22 * rimStrength), location: 0.0),
+                        .init(color: .white.opacity(0.07 * rimStrength), location: 0.42),
+                        .init(color: .white.opacity(0.03 * rimStrength), location: 0.75),
+                        .init(color: .white.opacity(0.12 * rimStrength), location: 1.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                ),
+                lineWidth: 4
+            )
+
+            // 3. Inner shadow on the lower half — the concave lip that makes
+            //    the edge read as a lens rather than a drawn outline.
+            shape.stroke(
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0.0),
+                        .init(color: .clear, location: 0.55),
+                        .init(color: .black.opacity(0.28 * rimStrength), location: 1.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                ),
+                lineWidth: 3
+            )
+
+            // 4. Specular hairline: the crisp highlight catching the top
+            //    edge, with a much weaker reflection at the bottom.
+            shape.stroke(
+                LinearGradient(
+                    stops: [
+                        .init(color: .white.opacity(0.75 * rimStrength), location: 0.0),
+                        .init(color: .white.opacity(0.16 * rimStrength), location: 0.40),
+                        .init(color: .white.opacity(0.06 * rimStrength), location: 0.80),
+                        .init(color: .white.opacity(0.30 * rimStrength), location: 1.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                ),
+                lineWidth: 1
             )
         }
         .allowsHitTesting(false)
@@ -924,9 +975,19 @@ enum BackdropLuminance {
     private static func stop() {
         loop?.cancel()
         loop = nil
-        current = nil
+        // Keep `current`: the floating island disappears entirely while idle,
+        // so the next notification rebuilds this view and needs the last real
+        // reading immediately. Clearing it (and posting nil) made every new
+        // card start with `backdropLuma == nil` → wallpaper proxy → 35% black
+        // scrim for its first frames (docs/04 P7).
         status = "off"
-        NotificationCenter.default.post(name: .bnBackdropLuminanceChanged, object: nil)
+        if let last = current {
+            NotificationCenter.default.post(
+                name: .bnBackdropLuminanceChanged, object: NSNumber(value: last)
+            )
+        } else {
+            NotificationCenter.default.post(name: .bnBackdropLuminanceChanged, object: nil)
+        }
     }
 
     nonisolated private static func capture() async -> Double? {
@@ -1072,8 +1133,8 @@ enum GlassDiagnostics {
         lastSurfaceBucket = bucket
         let text = "luma=" + (luma.map { String(format: "%.3f", $0) } ?? "nil")
             + " darkStrength=" + String(format: "%.2f", strength)
-            + " rim=" + String(format: "%.2f", rim)
-            + " faceWash=" + String(format: "%.3f", 0.09 * strength)
+            + " edge=" + String(format: "%.2f", rim)
+            + " centre=pure-window"
         let path = NSHomeDirectory() + "/bn-glass-surface.log"
         try? (text + "\n").write(
             to: URL(fileURLWithPath: path), atomically: true, encoding: .utf8
