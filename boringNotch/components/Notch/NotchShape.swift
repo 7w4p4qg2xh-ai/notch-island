@@ -498,14 +498,17 @@ struct NotchSurfaceBackground: View {
                 // card appears and expires.
                 scrim
                     .animation(.easeOut(duration: 0.2), value: scrimOpacity)
-            }
-            if showsDarkBackdropRim {
-                rim
+                if clearGlass, !reduceTransparency {
+                    // WWDC25 219 "Principles": highlights and shadow are
+                    // *intrinsic* layers of the material, not a dark-mode
+                    // patch. Keeping them in the tree at a low baseline also
+                    // means a revoked Screen Recording permission can no
+                    // longer leave the card as white type on nothing
+                    // (reported 11-14).
+                    glassSurfaceHighlights
+                }
             }
         }
-        // Insertion/removal of the rim needs the animation on the container:
-        // `.animation` on the child alone does not drive a transition.
-        .animation(.easeOut(duration: 0.25), value: showsDarkBackdropRim)
         .onAppear {
             GlassDefaultsMigration.run()
             GlassDiagnostics.log(tag: "probe", Self.probeSummary)
@@ -519,6 +522,11 @@ struct NotchSurfaceBackground: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .bnBackdropLuminanceChanged)) { note in
             backdropLuma = (note.object as? NSNumber)?.doubleValue
+            GlassDiagnostics.recordSurface(
+                luma: backdropLuma,
+                strength: darkBackdropStrength,
+                rim: rimStrength
+            )
         }
     }
 
@@ -657,42 +665,102 @@ struct NotchSurfaceBackground: View {
         backdropSampling ? backdropLuma : nil
     }
 
-    /// Draw the edge ourselves when clear glass sits on a dark backdrop.
+    /// 0…1 strength of Apple's adaptive ("Tinted") response to a dark
+    /// backdrop.
     ///
-    /// Clear glass reads as glass because it *bends* what is behind it. On a
-    /// uniform black backdrop there is nothing to bend — refraction returns
-    /// black, HIG says no dimming layer is needed, and the face layers are
-    /// zeroed by the dark-backdrop branch below. Three layers all end up
-    /// invisible, so the card disappears and only the white type is left
-    /// (reported 11-09). Apple's own clear glass keeps a specular edge in this
-    /// situation; that edge is what has to be drawn explicitly here, because no
-    /// private filter input survives a zero-luminance backdrop.
+    /// WWDC25 219 (13:13): *clear* Liquid Glass "does not have adaptive
+    /// behaviors" — it stays permanently transparent and belongs only over
+    /// media-rich backgrounds. Apple's own answer to a flat dark backdrop is
+    /// the regular/Tinted material: macOS 26.1 documents tinted items as
+    /// opaque against dark backgrounds, with notifications the named case.
+    /// HIG Materials likewise says alerts (and anything with a lot of text)
+    /// use regular, not clear.
     ///
-    /// No `.blendMode` / `.shadow`: both force an offscreen pass, and a backdrop
-    /// layer has no window server to sample in one (docs/04). A plain stroked
-    /// gradient composites as a sibling layer and leaves the glass untouched.
-    private var showsDarkBackdropRim: Bool {
-        guard glassIsActive, clearGlass, !reduceTransparency else { return false }
-        guard let luma = sampledLuma else { return false }
-        return luma <= 0.22
+    /// We deliberately leave the clear *pipeline* untouched — mixing the two
+    /// parameter sets is what made regular read as "the same glass smudged"
+    /// (docs/04 C12). Instead we supply the adaptive layers Apple describes
+    /// as separate siblings: a light face wash, a specular band, a ring
+    /// shadow and a specular rim. Clear glass on black is a material vacuum:
+    /// there is nothing to refract, HIG forbids a dimming layer, and the dark
+    /// branch zeroes the face layers (docs/04 P5), so these layers are the
+    /// only thing that can define the object's silhouette.
+    ///
+    /// Continuous rather than a boolean: a hard cut at 0.22 made the card
+    /// flicker whenever the smoothed sample crawled across the threshold.
+    private var darkBackdropStrength: Double {
+        guard glassIsActive, clearGlass, !reduceTransparency else { return 0 }
+        guard let luma = sampledLuma else { return 0 }
+        // The upper bound matches the scrim's "bright" gate, so the face and
+        // the wash can never disagree about whether the backdrop is dark.
+        let t = (luma - 0.22) / (0.45 - 0.22)
+        return 1 - min(max(t, 0), 1)
     }
 
-    private var rim: some View {
-        shape
-            .stroke(
+    /// The specular edge is intrinsic to the glass, so it never disappears.
+    /// On a bright backdrop lensing defines the shape and only a faint edge is
+    /// needed; on black it becomes the main depth cue. The baseline also
+    /// covers a revoked Screen Recording permission, where `sampledLuma` is
+    /// nil — that case must no longer degrade to "white type on nothing".
+    private var rimStrength: Double {
+        0.22 + 0.78 * darkBackdropStrength
+    }
+
+    /// A *light* wash, never another black scrim. The 11-08 "grey slab" came
+    /// from three darkening layers stacked together; lifting a dark backdrop
+    /// slightly is the transparent equivalent of Apple's Tinted look and
+    /// cannot collapse back into that slab (docs/04 P1).
+    private var faceWashOpacity: Double {
+        0.09 * darkBackdropStrength
+    }
+
+    /// No `.blendMode`, `.shadow` or `.mask` anywhere in here: each forces an
+    /// offscreen pass and a backdrop layer has no window server to sample in
+    /// one (docs/04 C8 / P5). Plain `fill` / `stroke` gradients composite as
+    /// sibling layers and leave the glass untouched.
+    @ViewBuilder
+    private var glassSurfaceHighlights: some View {
+        ZStack {
+            // 1. Adaptive face — the "Tinted" half of Apple's adaptivity.
+            //    Only appears on genuinely dark content, uniformly, so it
+            //    cannot read as a second material (docs/04 C3).
+            shape.fill(Color.white.opacity(faceWashOpacity))
+
+            // 2. Specular band: light from above catching the thickness of the
+            //    slab, plus a faint reflected glint at the bottom edge.
+            shape.fill(
                 LinearGradient(
                     stops: [
-                        .init(color: .white.opacity(0.34), location: 0.0),
-                        .init(color: .white.opacity(0.14), location: 0.55),
-                        .init(color: .white.opacity(0.07), location: 1.0)
+                        .init(color: .white.opacity(0.14 * darkBackdropStrength), location: 0.0),
+                        .init(color: .white.opacity(0.02 * darkBackdropStrength), location: 0.26),
+                        .init(color: .clear, location: 0.60),
+                        .init(color: .white.opacity(0.05 * darkBackdropStrength), location: 1.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+
+            // 3. Ring shadow — the shadow layer WWDC describes as what lifts
+            //    glass off its backdrop. A stroke, not `.shadow`.
+            shape.stroke(Color.black.opacity(0.45 * rimStrength), lineWidth: 2.5)
+
+            // 4. Specular rim: brightest along the top, dim at the sides,
+            //    with a weaker reflected line along the bottom.
+            shape.stroke(
+                LinearGradient(
+                    stops: [
+                        .init(color: .white.opacity(0.65 * rimStrength), location: 0.0),
+                        .init(color: .white.opacity(0.16 * rimStrength), location: 0.42),
+                        .init(color: .white.opacity(0.07 * rimStrength), location: 0.80),
+                        .init(color: .white.opacity(0.28 * rimStrength), location: 1.0)
                     ],
                     startPoint: .top,
                     endPoint: .bottom
                 ),
-                lineWidth: 1
+                lineWidth: 1.25
             )
-            .allowsHitTesting(false)
-            .transition(.opacity)
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -982,6 +1050,25 @@ enum GlassDiagnostics {
         let path = NSHomeDirectory() + "/bn-glass-luma.log"
         let stamp = ISO8601DateFormatter().string(from: Date())
         try? ("\(stamp) backdropLuma=\(value)\n").write(
+            to: URL(fileURLWithPath: path), atomically: true, encoding: .utf8
+        )
+    }
+
+    /// Written only when the adaptive strength crosses a 0.1 bucket, so the
+    /// sampler's ~1.4 updates/s do not turn into ~1.4 disk writes/s. This is
+    /// the only read-back for the sibling highlight layers — they are plain
+    /// SwiftUI shapes and have no private filter to dump.
+    private static var lastSurfaceBucket: Int = -1
+    static func recordSurface(luma: Double?, strength: Double, rim: Double) {
+        let bucket = Int(strength * 10)
+        guard bucket != lastSurfaceBucket else { return }
+        lastSurfaceBucket = bucket
+        let text = "luma=" + (luma.map { String(format: "%.3f", $0) } ?? "nil")
+            + " darkStrength=" + String(format: "%.2f", strength)
+            + " rim=" + String(format: "%.2f", rim)
+            + " faceWash=" + String(format: "%.3f", 0.09 * strength)
+        let path = NSHomeDirectory() + "/bn-glass-surface.log"
+        try? (text + "\n").write(
             to: URL(fileURLWithPath: path), atomically: true, encoding: .utf8
         )
     }
