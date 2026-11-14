@@ -1836,10 +1836,14 @@ extension ContentView {
             return
         }
 
+        // 2026-11-14: hideOnClosed 管的是「全屏时收起态刘海要不要藏」，
+        // 不该拦通知。它的初始值是 true，且只靠设置项变更事件重算；全屏播放时
+        // 会一直保持 true，导致通知抓到了却永远不自动展开（系统横幅又已被停泊
+        // 到屏外，用户看到的就是「通知全没了」）。用户 11-08 已拍板全屏通知照常弹，
+        // 所以这里不再把 hideOnClosed 当作通知的闸门。
         guard Defaults[.notificationAutoExpand],
               !coordinator.firstLaunch,
               !isHovering,
-              !vm.hideOnClosed,
               !vm.isPopoverActive,
               !SharingStateManager.shared.preventNotchClose else {
             isNotificationPeeking = false

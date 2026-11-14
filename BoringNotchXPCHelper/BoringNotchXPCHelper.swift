@@ -53,8 +53,22 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         }
     }
 
+    /// 只弹一次系统权限对话框。主 app 会周期性轮询这个方法探测授权状态，
+    /// 每次都带 prompt 会连续弹窗。
+    private static var didPromptForAccessibility = false
+
     @objc func isAccessibilityAuthorized(with reply: @escaping (Bool) -> Void) {
-        reply(AXIsProcessTrusted())
+        let trusted = AXIsProcessTrusted()
+        // 未授权时用带 prompt 的版本请求一次。只有它会把这个 helper 放进
+        // 「隐私与安全性 → 辅助功能」列表；不带 prompt 的 AXIsProcessTrusted()
+        // 仅查询状态，而 TCC 不会展示从未请求过该权限的进程，用户只能在
+        // 列表里手动点 + 添加——2026-11-09 实测就是这个坑。
+        if !trusted, !Self.didPromptForAccessibility {
+            Self.didPromptForAccessibility = true
+            _ = AXIsProcessTrustedWithOptions(
+                [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+        }
+        reply(trusted)
     }
 
     @objc func migrateLegacyAppBundle(
