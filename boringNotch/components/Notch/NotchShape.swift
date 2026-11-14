@@ -744,73 +744,45 @@ struct NotchSurfaceBackground: View {
     /// Apple's specular highlights are built from inner shadows and gradient
     /// overlays that follow the outline — never a flat face fill.
     ///
-    /// So every layer below is a `stroke` hugging the outline, from a wide
-    /// faint glow down to a crisp hairline. Nothing fills the centre: the
-    /// dark window behind stays visible *through* the card.
+    /// 🔴 21:33 user: "深色背景下这个高光太奇怪了". The first edge version
+    /// stacked 10pt / 4pt / 3pt / 1pt strokes. A `stroke` is centred on the
+    /// path, so half of every wide one spills **outside** the outline — on a
+    /// dark backdrop that painted a thick glowing frame around the card:
+    /// "a popup with a border", not glass. Keep only a hairline plus a 2pt
+    /// top-edge glow (1pt of spill at most).
     ///
-    /// No `.blendMode`, `.shadow`, `.mask` or `.clipShape` anywhere in here:
-    /// each forces an offscreen pass and a backdrop layer has no window
-    /// server to sample in one (docs/04 C8 / P5).
+    /// Nothing fills the centre: the dark window behind stays visible
+    /// *through* the card. No `.blendMode`, `.shadow`, `.mask` or
+    /// `.clipShape` — each forces an offscreen pass and a backdrop layer has
+    /// no window server to sample in one (docs/04 C8 / P5).
     @ViewBuilder
     private var glassSurfaceHighlights: some View {
         ZStack {
-            // 1. Broad, faint environmental glow — light spilling off the
-            //    edge. Wide + low alpha so it fades instead of reading as a
-            //    second border.
+            // A 2pt glow that exists ONLY along the top edge. The sides and
+            // bottom are fully transparent, so no visible frame can form.
             shape.stroke(
                 LinearGradient(
                     stops: [
-                        .init(color: .white.opacity(0.10 * rimStrength), location: 0.0),
-                        .init(color: .white.opacity(0.025 * rimStrength), location: 0.50),
-                        .init(color: .white.opacity(0.05 * rimStrength), location: 1.0)
+                        .init(color: .white.opacity(0.16 * rimStrength), location: 0.0),
+                        .init(color: .white.opacity(0.05 * rimStrength), location: 0.16),
+                        .init(color: .clear, location: 0.34),
+                        .init(color: .clear, location: 1.0)
                     ],
                     startPoint: .top,
                     endPoint: .bottom
                 ),
-                lineWidth: 10
+                lineWidth: 2
             )
 
-            // 2. Lens band: light concentrated by the curved edge. Bright on
-            //    top where the key light lands, with a weak reflected line
-            //    along the bottom.
+            // The specular hairline: bright along the top, fading down the
+            // sides, turning into a faint dark inner lip at the bottom.
             shape.stroke(
                 LinearGradient(
                     stops: [
-                        .init(color: .white.opacity(0.22 * rimStrength), location: 0.0),
-                        .init(color: .white.opacity(0.07 * rimStrength), location: 0.42),
-                        .init(color: .white.opacity(0.03 * rimStrength), location: 0.75),
-                        .init(color: .white.opacity(0.12 * rimStrength), location: 1.0)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                ),
-                lineWidth: 4
-            )
-
-            // 3. Inner shadow on the lower half — the concave lip that makes
-            //    the edge read as a lens rather than a drawn outline.
-            shape.stroke(
-                LinearGradient(
-                    stops: [
-                        .init(color: .clear, location: 0.0),
-                        .init(color: .clear, location: 0.55),
-                        .init(color: .black.opacity(0.28 * rimStrength), location: 1.0)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                ),
-                lineWidth: 3
-            )
-
-            // 4. Specular hairline: the crisp highlight catching the top
-            //    edge, with a much weaker reflection at the bottom.
-            shape.stroke(
-                LinearGradient(
-                    stops: [
-                        .init(color: .white.opacity(0.75 * rimStrength), location: 0.0),
-                        .init(color: .white.opacity(0.16 * rimStrength), location: 0.40),
-                        .init(color: .white.opacity(0.06 * rimStrength), location: 0.80),
-                        .init(color: .white.opacity(0.30 * rimStrength), location: 1.0)
+                        .init(color: .white.opacity(0.55 * rimStrength), location: 0.0),
+                        .init(color: .white.opacity(0.16 * rimStrength), location: 0.20),
+                        .init(color: .white.opacity(0.04 * rimStrength), location: 0.60),
+                        .init(color: .black.opacity(0.18 * rimStrength), location: 1.0)
                     ],
                     startPoint: .top,
                     endPoint: .bottom

@@ -43,6 +43,12 @@ final class SystemNotificationManager: ObservableObject {
     private var dismissTask: Task<Void, Never>?
     private var notificationObserver: NSObjectProtocol?
     private var isUserPresent = false
+    /// Last time each token was actually shown. Rebuilding the AX observer
+    /// re-scans banners still sitting in Notification Center, so the very
+    /// same payload can arrive again without any new system event
+    /// (docs/04 Q).
+    private var recentlyShown: [String: Date] = [:]
+    private let recentTokenWindow: TimeInterval = 60
 
     private init() {
         notificationObserver = NotificationCenter.default.addObserver(
@@ -142,6 +148,17 @@ final class SystemNotificationManager: ObservableObject {
 
     private func add(_ payload: [String: String]) {
         guard let token = payload["token"], !token.isEmpty else { return }
+        let now = Date()
+        recentlyShown = recentlyShown.filter {
+            now.timeIntervalSince($0.value) < recentTokenWindow
+        }
+        if recentlyShown[token] != nil {
+            // Same stale banner re-scanned after an observer re-arm. Refresh
+            // the timestamp so a banner that never leaves the center cannot
+            // resurface every few minutes.
+            recentlyShown[token] = now
+            return
+        }
         bnDebugLog(
             "recv token=\(token.prefix(6)) app=\(payload["appName"] ?? "-")"
             + " title=\(payload["title"] ?? "-") active=\(activeNotification == nil ? "none" : "busy")"
@@ -189,6 +206,7 @@ final class SystemNotificationManager: ObservableObject {
     }
 
     private func show(_ notification: SystemNotification) {
+        recentlyShown[notification.id] = Date()
         bnDebugLog("show token=\(notification.id.prefix(6)) app=\(notification.appName ?? "-")")
         dismissTask?.cancel()
         activeNotification = notification
@@ -366,7 +384,23 @@ final class SystemNotificationManager: ObservableObject {
             [.excludeDesktopElements], kCGNullWindowID
         ) as? [[String: Any]] else { return false }
         for w in list {
-            guard (w[kCGWindowLayer as String] as? Int ?? 0) >= 20 else { continue }
+            // 🔴 Layer ceiling. Window Server also paints full-screen
+            // "Packages Display N Shield" windows at layer 2147483646 with
+            // exactly the same 1512×982 / 1920×1080 bounds at (0,0). Without
+            // the ceiling this probe reported a runaway banner permanently:
+            // the watchdog re-armed every ~20s, each re-arm rebuilt the AX
+            // observer and re-scanned two stale banners, and the same two
+            // notifications popped up forever (docs/04 Q). The real banner
+            // host is layer 23, parked at (-10000,-10000).
+            guard let layer = w[kCGWindowLayer as String] as? Int,
+                  layer >= 20, layer < 1000 else { continue }
+            // The Dock also owns a 1512×982 window at (0,0) on layer 20, so
+            // the layer ceiling alone is not enough. Only the Notification
+            // Center host counts; its bundle id is stable across localisations
+            // (verified on this machine: pid 22915 → com.apple.notificationcenterui).
+            guard let pid = w[kCGWindowOwnerPID as String] as? Int,
+                  NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier
+                    == "com.apple.notificationcenterui" else { continue }
             let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
             let width = b["Width"] as? Double ?? 0
             let height = b["Height"] as? Double ?? 0
