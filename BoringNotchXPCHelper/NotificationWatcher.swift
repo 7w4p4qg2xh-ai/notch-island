@@ -163,6 +163,15 @@ final class NotificationWatcher {
     /// a healthy attachment answers attribute reads. `start()` is an
     /// idempotent re-arm, so an occasional spurious rebuild is harmless.
     private var healthTimer: Timer?
+    /// 2026-11-14: the health check's "AX trust lost" branch calls `stop()`,
+    /// which also invalidates `healthTimer` — so a *transient* trust blip used
+    /// to leave capture dead for good and hand banners back to the system.
+    /// This watchdog is deliberately independent of `stop()`: as long as the
+    /// app asked for mirroring (`wantsWatching`), it keeps re-arming.
+    /// Only `stopWatching()` (app explicitly turned it off) clears the intent.
+    private var wantsWatching = false
+    private var watchdogTimer: Timer?
+    private var lastRearm = Date.distantPast
 
     var isRunning: Bool { appElement != nil }
 
@@ -211,6 +220,11 @@ final class NotificationWatcher {
 
     @discardableResult
     func start() -> Bool {
+        // Remember the *intent* before the AX trust check: even a failed
+        // start (trust blip, NotificationCenter not up yet) must stay on the
+        // watchdog's radar so it retries instead of silently giving up.
+        wantsWatching = true
+        startWatchdog()
         guard AXIsProcessTrusted() else {
             // Stale running state after a revoke would block the next
             // start() (isRunning guard), leaving capture dead even once
@@ -281,7 +295,47 @@ final class NotificationWatcher {
         appElement = nil
     }
 
+    /// App explicitly turned notification mirroring off, or the app went away.
+    /// This is the ONLY path allowed to clear the recovery intent; every
+    /// internal `stop()` (re-arm, health check, center restart) must leave it
+    /// set so the watchdog can bring the watcher back.
+    func stopWatching() {
+        wantsWatching = false
+        watchdogTimer?.invalidate()
+        watchdogTimer = nil
+        stop()
+    }
+
     // MARK: - Self-healing
+
+    private func startWatchdog() {
+        guard watchdogTimer == nil else { return }
+        lastRearm = Date()
+        let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            self?.watchdogTick()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        watchdogTimer = timer
+    }
+
+    private func watchdogTick() {
+        guard wantsWatching else { return }
+        if !isRunning {
+            // Trust blip, NotificationCenter relaunch, or the health check's
+            // bare `stop()`: rebuild now instead of waiting for a relaunch.
+            _ = start()
+            lastRearm = Date()
+            return
+        }
+        // An AX attachment can still answer attribute reads while its
+        // notification registration has gone deaf — the 60s health probe
+        // cannot see that. Rebuild the observer periodically so a silently
+        // deaf watcher heals by itself (5 min keeps the cost negligible).
+        if Date().timeIntervalSince(lastRearm) >= 300 {
+            lastRearm = Date()
+            _ = start()
+        }
+    }
 
     private func currentCenterPID() -> pid_t {
         NSRunningApplication.runningApplications(
@@ -328,7 +382,11 @@ final class NotificationWatcher {
     private func checkAXHealth() {
         guard let appElement else { return }
         guard AXIsProcessTrusted() else {
-            NSLog("[boringNotch] health check: AX trust lost; resetting watcher")
+            // Do NOT try to re-arm here: trust is false right now, so start()
+            // would fail again. `stop()` also invalidates healthTimer, but the
+            // watchdog is independent and will retry every 5s until trust
+            // returns. Previously this left the watcher dead for good.
+            NSLog("[boringNotch] health check: AX trust lost; watchdog will retry")
             stop()
             return
         }

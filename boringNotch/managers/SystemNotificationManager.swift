@@ -4,6 +4,7 @@
 //
 import AppKit
 import Combine
+import CoreGraphics
 import Defaults
 
 /// One button the mirrored banner offered ("Open", "Accept"…). The notch draws
@@ -317,5 +318,62 @@ final class SystemNotificationManager: ObservableObject {
     private func nonEmpty(_ value: String?) -> String? {
         guard let value, !value.isEmpty else { return nil }
         return value
+    }
+
+    // MARK: - Banner-host watchdog (2026-11-14)
+
+    private var watchdogTask: Task<Void, Never>?
+    private var onScreenStreak = 0
+
+    /// The helper can lose its AX attachment in ways none of its internal
+    /// timers reliably catch: a transient trust blip makes the health check
+    /// `stop()` (which also invalidates that very timer), and a full
+    /// NotificationCenter relaunch can race the re-attach. From the outside
+    /// every one of these looks identical — the full-screen banner host
+    /// window comes back to (0,0) and the user sees the system banner again.
+    /// Watch that symptom directly rather than guessing at internal state.
+    /// Two consecutive sightings (~20s) avoid re-arming during the brief
+    /// window while a fresh NotificationCenter is still coming up.
+    func startBannerWatchdog() {
+        guard watchdogTask == nil else { return }
+        watchdogTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled, let self else { return }
+                guard Defaults[.notificationLiveActivity] else {
+                    self.onScreenStreak = 0
+                    continue
+                }
+                if Self.bannerHostIsOnScreen() {
+                    self.onScreenStreak += 1
+                } else {
+                    self.onScreenStreak = 0
+                }
+                if self.onScreenStreak >= 2 {
+                    self.onScreenStreak = 0
+                    await self.start()
+                }
+            }
+        }
+    }
+
+    /// The banner host is the full-display transparent window (layer 23).
+    /// While mirroring works it is parked at (-10000,-10000); seeing it on
+    /// screen means the system banner has taken over. No TCC/screen-recording
+    /// permission is needed for CGWindowListCopyWindowInfo.
+    private static func bannerHostIsOnScreen() -> Bool {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return false }
+        for w in list {
+            guard (w[kCGWindowLayer as String] as? Int ?? 0) >= 20 else { continue }
+            let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+            let width = b["Width"] as? Double ?? 0
+            let height = b["Height"] as? Double ?? 0
+            let x = b["X"] as? Double ?? 0
+            let y = b["Y"] as? Double ?? 0
+            if width > 1000, height > 600, x > -9000, y > -9000 { return true }
+        }
+        return false
     }
 }

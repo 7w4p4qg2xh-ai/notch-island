@@ -258,6 +258,9 @@ final class BoringViewCoordinator: ObservableObject {
             if Defaults[.notificationLiveActivity] {
                 await SystemNotificationManager.shared.start()
             }
+            // Independent of the on/off value at launch: the toggle can be
+            // switched on later, and the watchdog checks it on every tick.
+            SystemNotificationManager.shared.startBannerWatchdog()
             self.applyOSDSources()
         }
     }

@@ -143,7 +143,7 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
     /// on screen, otherwise the system keeps painting every notification into
     /// an off-screen window and the user sees none of them (issue #1577).
     static func handleClientDisconnect() {
-        DispatchQueue.main.async { watcher.stop() }
+        DispatchQueue.main.async { watcher.stopWatching() }
     }
 
     @objc func startNotificationWatching(with reply: @escaping (Bool) -> Void) {
@@ -221,7 +221,7 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
     }
 
     @objc func stopNotificationWatching() {
-        DispatchQueue.main.async { Self.watcher.stop() }
+        DispatchQueue.main.async { Self.watcher.stopWatching() }
     }
 
     @objc func setNotificationFilter(_ bundleIDs: [String], allApps: Bool) {
