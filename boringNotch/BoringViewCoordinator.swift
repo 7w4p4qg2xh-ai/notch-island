@@ -309,15 +309,20 @@ final class BoringViewCoordinator: ObservableObject {
                 }
             }
 
-            // 11-15: brightness events carry the menu-bar / built-in display's
-            // UUID, but the floating island lives on the external display and
-            // would never receive them. Volume/backlight already broadcast to
-            // every screen, so do the same for brightness instead of silently
-            // dropping the OSD on the island.
-            let effectiveTarget = type == .brightness ? nil : targetScreenUUID
-            if let targetUUID = effectiveTarget {
+            // 11-15 (revised after user reminder): the island is ONE window
+            // pinned to the menu-bar screen (docs/04 K4; 15:56 / 16:59 user
+            // decisions). Broadcasting to every display was the wrong fix.
+            // Brightness carries the UUID of the display that owns the hardware
+            // brightness control (often the built-in panel), so ALSO deliver it
+            // to the menu-bar screen where the island actually lives.
+            if let targetUUID = targetScreenUUID {
                 // Update specific screen
                 updateState(for: targetUUID)
+                if type == .brightness,
+                   let islandUUID = NSScreen.menuBarScreen?.displayUUID,
+                   islandUUID != targetUUID {
+                    updateState(for: islandUUID)
+                }
             } else {
                 // Update ALL connected screens + the main screen as fallback
                 // We use known screen UUIDs from NSScreen

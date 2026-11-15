@@ -1,5 +1,7 @@
+import ApplicationServices
 import Combine
 import CoreAudio
+import CoreGraphics
 import Defaults
 import Foundation
 import IOKit
@@ -438,6 +440,11 @@ final class PeripheralBatteryManager: ObservableObject {
     private var alertedLowDevices: Set<String> = []
     /// CoreAudio can fire several times for one pairing; don't re-greet.
     private var lastConnectionPeekAt: [String: Date] = [:]
+    /// 🔴 11-15: `knownDevices.isEmpty` used to stand for "first snapshot".
+    /// On this machine there is often NO connected Bluetooth device at all,
+    /// so it stayed empty forever and every poll bailed out as a baseline —
+    /// a real connection was never detected. Track completion explicitly.
+    private var hasBaseline = false
     private var cancellables: [AnyCancellable] = []
 
     private init() {
@@ -454,24 +461,17 @@ final class PeripheralBatteryManager: ObservableObject {
     func start() {
         guard pollTask == nil else { return }
         AudioDeviceConnectionWatcher.shared.start()
-        // 11-15: a baseline taken shortly after launch lets the instant
-        // connection trigger tell a NEW pairing from something already
-        // connected. The 15s / 30s poll loop below is deliberately untouched.
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
-            guard knownDevices.isEmpty else { return }
-            let baseline = await Self.fetchSnapshot()
-            if knownDevices.isEmpty {
-                knownDevices = baseline
-                connectedDevices = baseline
-            }
-        }
+        BluetoothPromptHider.shared.start()
+        // 11-15: 15s + 30s was far too slow for "the moment AirPods connect",
+        // and CoreAudio alone is not enough (macOS often asks the user to
+        // confirm the connection first, so the output device never switches).
+        // system_profiler stays on a background queue; 2s/4s is responsive
+        // without a permanent busy loop.
         pollTask = Task { [weak self] in
-            // Give launch some breathing room; system_profiler is not cheap.
-            try? await Task.sleep(for: .seconds(15))
+            try? await Task.sleep(for: .seconds(2))
             while !Task.isCancelled {
                 await self?.pollOnce()
-                try? await Task.sleep(for: .seconds(30))
+                try? await Task.sleep(for: .seconds(4))
             }
         }
     }
@@ -493,9 +493,16 @@ final class PeripheralBatteryManager: ObservableObject {
         knownDevices = snapshot
         connectedDevices = snapshot
 
-        if previous.isEmpty {
-            // Baseline: don't greet devices that were already connected.
+        // 🔴 Explicit baseline flag, NOT `previous.isEmpty` (see the note on
+        // the property). Without this, a machine with zero connected devices
+        // never detects any new connection at all.
+        if !hasBaseline {
+            hasBaseline = true
+            AirPodsTrace.log("baseline(poll) count=\(snapshot.count) names=\(snapshot.map(\.name))")
             return
+        }
+        if snapshot.count != previous.count {
+            AirPodsTrace.log("poll changed count=\(snapshot.count) names=\(snapshot.map(\.name))")
         }
 
         // system_profiler can report the same device more than once (the same
@@ -541,27 +548,35 @@ final class PeripheralBatteryManager: ObservableObject {
         }
         peekDevice = device
         isConnectionPeek = isConnection
+        AirPodsTrace.log("peek name=\(device.name) connection=\(isConnection) level=\(device.overallLevel.map(String.init) ?? "-")")
         NotchUIEventBus.events.send(.expandingView(type: .peripheralBattery))
     }
 
-    /// 11-15: called the instant the default output device changes. CoreAudio
-    /// fires before bluetoothd has published battery levels, so wait briefly
-    /// and take a fresh snapshot instead of waiting for the 30s poll.
+    /// 11-15: called by BOTH the CoreAudio output-device change and the system
+    /// Bluetooth prompt watcher. bluetoothd publishes battery levels a beat
+    /// AFTER the prompt / route change, so take a few quick snapshots instead
+    /// of trusting a single one.
     func handlePossibleConnection() async {
         guard Defaults[.peripheralBatteryEnabled] else { return }
-        try? await Task.sleep(for: .milliseconds(800))
-        let snapshot = await Self.fetchSnapshot()
-        let previous = knownDevices
-        knownDevices = snapshot
-        connectedDevices = snapshot
-        // Same baseline rule as process(): don't greet devices that were
-        // already paired before the app had a chance to look.
-        guard !previous.isEmpty else { return }
-        let previousNames = Set(previous.map(\.name))
-        for device in snapshot where device.hasBattery && device.looksLikeHeadphones {
-            guard !previousNames.contains(device.name) else { continue }
-            peek(device, isConnection: true)
+        guard hasBaseline else {
+            AirPodsTrace.log("connection trigger ignored: no baseline yet")
             return
+        }
+        let before = Set(knownDevices.map(\.name))
+        AirPodsTrace.log("connection trigger, before=\(before.sorted())")
+        for attempt in 1...3 {
+            try? await Task.sleep(for: .milliseconds(attempt == 1 ? 600 : 1200))
+            let snapshot = await Self.fetchSnapshot()
+            knownDevices = snapshot
+            connectedDevices = snapshot
+            let found = snapshot.first {
+                $0.hasBattery && $0.looksLikeHeadphones && !before.contains($0.name)
+            }
+            AirPodsTrace.log("attempt \(attempt) count=\(snapshot.count) new=\(found?.name ?? "none")")
+            if let found {
+                peek(found, isConnection: true)
+                return
+            }
         }
     }
 
@@ -688,5 +703,142 @@ final class AudioDeviceConnectionWatcher {
         ) == noErr else { return }
         address = addr
         listener = block
+    }
+}
+
+// MARK: - Trace (11-15)
+
+enum AirPodsTrace {
+    nonisolated static func log(_ message: String) {
+        let line = "\(Date()) \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("bn-airpods.log")
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        } else {
+            try? data.write(to: url)
+        }
+    }
+}
+
+// MARK: - Hide the system Bluetooth prompt (11-15)
+
+/// The user wants macOS's own AirPods prompt gone and only the island card.
+/// Window-list scanning needs no TCC permission; parking the window off-screen
+/// uses the same AX technique as NotificationWatcher.hide. A prompt that still
+/// has a "Connect" button is left alone — hiding a confirmation the user must
+/// click would make the device impossible to pair.
+final class BluetoothPromptHider {
+    static let shared = BluetoothPromptHider()
+
+    private var timer: DispatchSourceTimer?
+    private var lastTriggerAt: Date = .distantPast
+    private var lastSampleAt: Date = .distantPast
+
+    func start() {
+        guard timer == nil else { return }
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        t.schedule(deadline: .now() + 1, repeating: 1)
+        t.setEventHandler { [weak self] in self?.scan() }
+        t.resume()
+        timer = t
+    }
+
+    private func scan() {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return }
+
+        //定期采样：万一系统弹窗的 owner 不带 "Bluetooth"，下一次连一次耳机
+        //就能从日志里看到真实窗口名，不用再猜。
+        if Date().timeIntervalSince(lastSampleAt) > 20 {
+            lastSampleAt = Date()
+            let sample: [String] = list.compactMap { w in
+                guard let owner = w[kCGWindowOwnerName as String] as? String else { return nil }
+                let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+                let wd = b["Width"] as? Double ?? 0
+                let ht = b["Height"] as? Double ?? 0
+                guard wd > 60, wd < 1000, ht > 40, ht < 800 else { return nil }
+                let name = w[kCGWindowName as String] as? String ?? ""
+                return "\(owner):\(name)"
+            }
+            AirPodsTrace.log("windows sample=\(sample.prefix(12).joined(separator: " | "))")
+        }
+
+        var matchedPID: pid_t?
+        for w in list {
+            guard let owner = w[kCGWindowOwnerName as String] as? String else { continue }
+            let name = w[kCGWindowName as String] as? String ?? ""
+            let ownerHit = owner.localizedCaseInsensitiveContains("bluetooth")
+            let nameHit = name.localizedCaseInsensitiveContains("airpods")
+                || name.localizedCaseInsensitiveContains("蓝牙")
+            guard ownerHit || nameHit else { continue }
+            guard let b = w[kCGWindowBounds as String] as? [String: Any],
+                  let x = b["X"] as? Double, let y = b["Y"] as? Double,
+                  x > -9000, y > -9000,
+                  let width = b["Width"] as? Double, width > 60, width < 1000,
+                  let height = b["Height"] as? Double, height > 40, height < 800,
+                  let pid = w[kCGWindowOwnerPID as String] as? Int32
+            else { continue }
+            matchedPID = pid_t(pid)
+            AirPodsTrace.log("prompt owner=\(owner) name=\(name) pid=\(pid) bounds=\(b)")
+            break
+        }
+        guard let pid = matchedPID else { return }
+
+        // A prompt stays up for a few seconds; don't queue a snapshot per tick.
+        if Date().timeIntervalSince(lastTriggerAt) > 6 {
+            lastTriggerAt = Date()
+            Task { @MainActor in
+                await PeripheralBatteryManager.shared.handlePossibleConnection()
+            }
+        }
+        hideSystemPrompt(pid: pid)
+    }
+
+    private func hideSystemPrompt(pid: pid_t) {
+        guard AXIsProcessTrusted() else {
+            AirPodsTrace.log("hide skipped: no accessibility trust")
+            return
+        }
+        let app = AXUIElementCreateApplication(pid)
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &raw) == .success,
+              let windows = raw as? [AXUIElement] else { return }
+        for window in windows {
+            if hasConnectButton(window) {
+                AirPodsTrace.log("hide skipped: prompt has a Connect button")
+                continue
+            }
+            var hidden = CGPoint(x: -10000, y: -10000)
+            guard let position = AXValueCreate(.cgPoint, &hidden) else { continue }
+            let moved = AXUIElementSetAttributeValue(
+                window, kAXPositionAttribute as CFString, position
+            ) == .success
+            AirPodsTrace.log("hide move=\(moved)")
+        }
+    }
+
+    private func hasConnectButton(_ element: AXUIElement, depth: Int = 0) -> Bool {
+        guard depth < 5 else { return false }
+        var roleRaw: CFTypeRef?
+        var titleRaw: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRaw)
+        AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &titleRaw)
+        if let role = roleRaw as? String, role == "AXButton",
+           let title = titleRaw as? String,
+           title.localizedCaseInsensitiveContains("连接")
+            || title.localizedCaseInsensitiveContains("connect") {
+            return true
+        }
+        var childrenRaw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRaw) == .success,
+              let children = childrenRaw as? [AXUIElement] else { return false }
+        for child in children.prefix(60) where hasConnectButton(child, depth: depth + 1) {
+            return true
+        }
+        return false
     }
 }
