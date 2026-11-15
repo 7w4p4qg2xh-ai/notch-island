@@ -818,6 +818,21 @@ final class BluetoothPromptHider {
         let candidates = bubbleCandidates(in: list)
         if Date().timeIntervalSince(lastSampleAt) > 20 {
             lastSampleAt = Date()
+            // Record EVERY window in the top band with its real geometry, even
+            // when it does not match the candidate filter. If the next real
+            // bubble falls outside the filter, this line is what tells us the
+            // exact size/layer to widen it to — no guessing (docs/04 S5).
+            let top: [String] = list.compactMap { w in
+                guard let owner = w[kCGWindowOwnerName as String] as? String else { return nil }
+                let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+                let y = b["Y"] as? Double ?? 0
+                guard y >= -30, y < 160 else { return nil }
+                let wd = b["Width"] as? Double ?? 0
+                let ht = b["Height"] as? Double ?? 0
+                let layer = w[kCGWindowLayer as String] as? Int ?? -1
+                return "\(owner)#\(Int(wd))x\(Int(ht))@\(Int(y))L\(layer)"
+            }
+            AirPodsTrace.log("top windows=\(top.prefix(20).joined(separator: " | "))")
             AirPodsTrace.log("bubble candidates=\(candidates.map { "\($0.owner)#\($0.number)" }.joined(separator: " | "))")
         }
         for candidate in candidates {
@@ -838,7 +853,7 @@ final class BluetoothPromptHider {
             let y = b["Y"] as? Double ?? 0
             let wd = b["Width"] as? Double ?? 0
             let ht = b["Height"] as? Double ?? 0
-            guard y >= -10, y < 120, wd >= 110, wd <= 600, ht >= 22, ht <= 130 else { continue }
+            guard y >= -30, y < 160, wd >= 80, wd <= 700, ht >= 18, ht <= 160 else { continue }
             guard let pid = w[kCGWindowOwnerPID as String] as? Int32,
                   let number = w[kCGWindowNumber as String] as? Int else { continue }
             out.append(BubbleCandidate(number: number, pid: pid_t(pid), owner: owner))
