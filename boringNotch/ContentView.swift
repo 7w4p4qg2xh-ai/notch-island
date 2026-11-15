@@ -167,7 +167,6 @@ struct ContentView: View {
             && coordinator.expandingView.show
             && coordinator.expandingView.type == .peripheralBattery
             && Defaults[.peripheralBatteryEnabled]
-            && peripheralBatteryModel.isConnectionPeek
     }
 
     private var showsMusicCard: Bool {
@@ -514,7 +513,11 @@ struct ContentView: View {
            !musicManager.isPlaying,
            musicManager.isPlayerIdle,
            Defaults[.showNotHumanFace],
-           !vm.hideOnClosed {
+           !vm.hideOnClosed,
+           // 17:29: BoringFaceAnimation paints a solid black camera-mask
+           // rectangle. The island has no camera and must stay invisible
+           // while idle (docs/04 F).
+           !usesFloatingIsland {
             return .face
         }
         return .idle
@@ -527,10 +530,12 @@ struct ContentView: View {
             chinWidth = nowPlayingFallbackNoticeWidth
         } else if coordinator.expandingView.type == .battery && coordinator.expandingView.show
             && vm.notchState == .closed && Defaults[.showPowerStatusNotifications] {
-            chinWidth = 640
+            // 17:29: 640 is the edge-flush notch plate width. On the island
+            // it paints a full-width black bar over the menu bar.
+            chinWidth = usesFloatingIsland ? 240 : 640
         } else if coordinator.expandingView.type == .peripheralBattery && coordinator.expandingView.show
             && vm.notchState == .closed && Defaults[.peripheralBatteryEnabled] {
-            chinWidth = showsConnectionCard ? islandCardWidth : 640
+            chinWidth = usesFloatingIsland ? islandCardWidth : 640
         } else if vm.notchState == .closed, !vm.hideOnClosed, let activity = selectedActivity {
             // Sized for whichever activity is actually on top, not for
             // whichever happens to exist — otherwise swiping to music while a
@@ -826,7 +831,9 @@ struct ContentView: View {
                                 // text lines as a notification, so it takes
                                 // the same uniform wash. The 24pt capsule
                                 // stays at 0.25 or it reads as black again.
-                                minimumScrim: (showsNotificationCard || showsMusicCard || showsConnectionCard)
+                                minimumScrim: (showsNotificationCard || showsMusicCard || showsConnectionCard
+                                    || (usesFloatingIsland && coordinator.expandingView.show
+                                        && coordinator.expandingView.type == .battery))
                                     ? 0.35
                                     : closedPillScrim,
                                 // The closed island is glass too — one material
@@ -1120,6 +1127,13 @@ struct ContentView: View {
                        let notice = musicManager.nowPlayingNotice {
                         nowPlayingFallbackNotice(notice)
                             .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                    } else if usesFloatingIsland
+                                && coordinator.expandingView.type == .battery
+                                && coordinator.expandingView.show
+                                && vm.notchState == .closed
+                                && Defaults[.showPowerStatusNotifications] {
+                        islandBatteryPeek
+                            .transition(.opacity)
                     } else if coordinator.expandingView.type == .battery && coordinator.expandingView.show
                         && vm.notchState == .closed && Defaults[.showPowerStatusNotifications] {
                         HStack(spacing: 0) {
@@ -1172,7 +1186,7 @@ struct ContentView: View {
                                 .frame(width: 76, alignment: .trailing)
                             }
                             .frame(height: displayClosedNotchHeight, alignment: .center)
-                        } else if coordinator.shouldShowSneakPeek(on: vm.screenUUID) && Defaults[.inlineOSD] && (coordinator.sneakPeekState(for: vm.screenUUID).type != .music) && (coordinator.sneakPeekState(for: vm.screenUUID).type != .battery) && vm.notchState == .closed {
+                        } else if coordinator.shouldShowSneakPeek(on: vm.screenUUID) && (usesFloatingIsland || Defaults[.inlineOSD]) && (coordinator.sneakPeekState(for: vm.screenUUID).type != .music) && (coordinator.sneakPeekState(for: vm.screenUUID).type != .battery) && vm.notchState == .closed {
                            InlineOSD(
                               type: coordinator.binding(for: vm.screenUUID).type,
                               value: coordinator.binding(for: vm.screenUUID).value,
@@ -1204,7 +1218,7 @@ struct ContentView: View {
                                       .frame(alignment: .center)
                               }
                           }
-                      } else if !coordinator.expandingView.show && vm.notchState == .closed && (!musicManager.isPlaying && musicManager.isPlayerIdle) && Defaults[.showNotHumanFace] && !vm.hideOnClosed {
+                      } else if !coordinator.expandingView.show && vm.notchState == .closed && (!musicManager.isPlaying && musicManager.isPlayerIdle) && Defaults[.showNotHumanFace] && !vm.hideOnClosed && !usesFloatingIsland {
                           BoringFaceAnimation()
                        } else if showsHeader {
                            // No tab bar over a notification: it's a glance,
@@ -1241,7 +1255,7 @@ struct ContentView: View {
                        }
 
                         if coordinator.shouldShowSneakPeek(on: vm.screenUUID) {
-                           if (coordinator.sneakPeekState(for: vm.screenUUID).type != .music) && (coordinator.sneakPeekState(for: vm.screenUUID).type != .battery) && !Defaults[.inlineOSD] && vm.notchState == .closed {
+                           if (coordinator.sneakPeekState(for: vm.screenUUID).type != .music) && (coordinator.sneakPeekState(for: vm.screenUUID).type != .battery) && !Defaults[.inlineOSD] && !usesFloatingIsland && vm.notchState == .closed {
                               SystemEventIndicatorModifier(
                                   eventType: coordinator.binding(for: vm.screenUUID).type,
                                   value: coordinator.binding(for: vm.screenUUID).value,
@@ -1566,6 +1580,34 @@ struct ContentView: View {
             .split(separator: "\n")
             .map(String.init)
             .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? ""
+    }
+
+    /// 17:29: the stock battery peek is "text + a BLACK camera-mask
+    /// rectangle + icon", fixed at 640pt. The island has no camera cutout, so
+    /// that rectangle becomes a solid black bar across the middle of the menu
+    /// bar. Draw a compact centred capsule instead — symmetric padding, no
+    /// fill, height from content, same as the floating HUD row.
+    private var islandBatteryPeek: some View {
+        HStack(spacing: 10) {
+            Text(batteryModel.statusText)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .shadow(color: .black.opacity(0.55), radius: 1)
+            Spacer(minLength: 0)
+            BoringBatteryView(
+                batteryWidth: 30,
+                isCharging: batteryModel.isCharging,
+                isInLowPowerMode: batteryModel.isInLowPowerMode,
+                isPluggedIn: batteryModel.isPluggedIn,
+                levelBattery: batteryModel.levelBattery,
+                maxAdapterWatts: batteryModel.maxAdapterWatts,
+                isForNotification: true
+            )
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .frame(width: 240)
     }
 
     /// 408 − 28 insets − 42 icon − 40 ring − 45 case caption − 4 gaps.

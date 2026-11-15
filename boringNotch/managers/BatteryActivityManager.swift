@@ -473,7 +473,13 @@ final class PeripheralBatteryManager: ObservableObject {
     func start() {
         guard pollTask == nil else { return }
         AudioDeviceConnectionWatcher.shared.start()
-        BluetoothPromptHider.shared.start()
+        // 🔴 17:29: DO NOT start BluetoothPromptHider. Its shape filter was
+        // wide enough to catch ordinary menu-bar drop-downs and app windows;
+        // the log shows 3 real hits with hidden=true (MenuBarAgent #770/#1181,
+        // 访达 #467), i.e. it MOVED SYSTEM WINDOWS OFF SCREEN and pushed
+        // nonsense island cards ("Deskflow 正在连接...", "连接服务器…").
+        // The user also decided at 15:04 to keep the system bubble (docs/04
+        // S8: it has no AX elements anyway). Keep the 4s poll only.
         // 11-15: 15s + 30s was far too slow for "the moment AirPods connect",
         // and CoreAudio alone is not enough (macOS often asks the user to
         // confirm the connection first, so the output device never switches).
@@ -574,7 +580,10 @@ final class PeripheralBatteryManager: ObservableObject {
         }
         peekDevice = device
         isConnectionPeek = isConnection
-        islandStatusMessage = isConnection ? "已连接" : "电量偏低"
+        // 17:29: on the island EVERY peripheral peek now uses the card, so a
+        // keyboard/mouse connecting must not be labelled "电量偏低".
+        let low = (device.lowestLevel ?? 100) <= Self.lowBatteryThreshold
+        islandStatusMessage = low ? "电量偏低" : "已连接"
         clearSystemPrompt()
         AirPodsTrace.log("peek name=\(device.name) connection=\(isConnection) level=\(device.overallLevel.map(String.init) ?? "-")")
         NotchUIEventBus.events.send(.expandingView(type: .peripheralBattery))
