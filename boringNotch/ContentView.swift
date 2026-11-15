@@ -1736,6 +1736,23 @@ struct ContentView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .frame(width: islandCardWidth, alignment: .leading)
+        // 11-16 几何探针：内建屏这张卡到底落在哪、多大。
+        // `y` 应该 ≥ 刘海高度（32），不再贴在菜单栏里。
+        .background {
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear {
+                        bnDebugLog("conncard island=\(usesFloatingIsland) notch=\(showsNotchConnectionCard)"
+                                   + " gap=\(notchConnectionCardTopGap) chin=\(computedChinWidth)"
+                                   + " frame=\(proxy.frame(in: .global))")
+                    }
+                    .onChange(of: proxy.size) { _, _ in
+                        bnDebugLog("conncard island=\(usesFloatingIsland) notch=\(showsNotchConnectionCard)"
+                                   + " gap=\(notchConnectionCardTopGap) chin=\(computedChinWidth)"
+                                   + " frame=\(proxy.frame(in: .global))")
+                    }
+            }
+        }
     }
 
     @ViewBuilder
