@@ -725,18 +725,18 @@ enum AirPodsTrace {
 
 // MARK: - Hide the system Bluetooth prompt (11-15)
 
-/// The user wants macOS's own AirPods prompt gone and only the island card.
+/// The user wants macOS's information-only AirPods prompt gone, but wants to
+/// click "Connect" personally (13:01: "不要自动连啊，跟系统一样我自己点啊").
 /// Window-list scanning needs no TCC permission; parking the window off-screen
-/// uses the same AX technique as NotificationWatcher.hide. A prompt that still
-/// has a "Connect" button is left alone — hiding a confirmation the user must
-/// click would make the device impossible to pair.
+/// uses the same AX technique as NotificationWatcher.hide. A prompt that has a
+/// "Connect" button is left completely alone — no auto-press, no hiding — so
+/// the system confirmation works exactly as before.
 final class BluetoothPromptHider {
     static let shared = BluetoothPromptHider()
 
     private var timer: DispatchSourceTimer?
     private var lastTriggerAt: Date = .distantPast
     private var lastSampleAt: Date = .distantPast
-    private var lastPressAt: Date = .distantPast
 
     func start() {
         guard timer == nil else { return }
@@ -810,17 +810,14 @@ final class BluetoothPromptHider {
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &raw) == .success,
               let windows = raw as? [AXUIElement] else { return }
         for window in windows {
-            if let button = connectButton(in: window) {
-                // macOS often asks the user to confirm ("Connect"). Pressing
-                // it is what actually connects the earbuds — parking the
-                // dialog without pressing would leave them unpaired and the
-                // island card would have no battery to show. Once pressed the
-                // system dismisses its own dialog; no window move needed.
-                if Date().timeIntervalSince(lastPressAt) > 10 {
-                    lastPressAt = Date()
-                    let pressed = AXUIElementPerformAction(button, "AXPress" as CFString) == .success
-                    AirPodsTrace.log("press Connect=\(pressed)")
-                }
+            if connectButton(in: window) != nil {
+                // 11-15 13:01 user decision: do NOT press "Connect" for the
+                // user. macOS's confirmation dialog stays on screen exactly
+                // as the system intends, so the user clicks it themselves.
+                // Only information-only prompts (no button) get hidden.
+                // Once the user connects, the 4s poll picks up the new device
+                // and the island card appears on its own.
+                AirPodsTrace.log("confirmation kept: user clicks Connect")
                 continue
             }
             var hidden = CGPoint(x: -10000, y: -10000)
