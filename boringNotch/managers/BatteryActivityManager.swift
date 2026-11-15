@@ -435,6 +435,15 @@ final class PeripheralBatteryManager: ObservableObject {
     /// one-line text pill.
     @Published private(set) var isConnectionPeek: Bool = false
 
+    /// 13:31: macOS 的菜单栏蓝牙气泡（连接 / 已转移到 iPhone / 断开…）被收进
+    /// 岛后，岛卡要显示系统原文和它自带的按钮。按钮的 AX 元素在窗口挪到屏外
+    /// 之后仍然可按（helper 的 NotificationWatcher 已验证）。
+    @Published private(set) var systemPromptDevice: String?
+    @Published private(set) var systemPromptMessage: String?
+    @Published private(set) var systemPromptButtonTitle: String?
+    private var systemPromptButton: AXUIElement?
+    private var systemPromptWindow: AXUIElement?
+
     private var pollTask: Task<Void, Never>?
     private var knownDevices: [PeripheralDeviceBattery] = []
     private var alertedLowDevices: Set<String> = []
@@ -548,8 +557,53 @@ final class PeripheralBatteryManager: ObservableObject {
         }
         peekDevice = device
         isConnectionPeek = isConnection
+        clearSystemPrompt()
         AirPodsTrace.log("peek name=\(device.name) connection=\(isConnection) level=\(device.overallLevel.map(String.init) ?? "-")")
         NotchUIEventBus.events.send(.expandingView(type: .peripheralBattery))
+    }
+
+    // MARK: - 系统气泡收口（13:31）
+
+    /// 气泡出现时调用：把系统原文和按钮交给岛卡，绝不按按钮。
+    func presentSystemPrompt(device: String, message: String, buttonTitle: String?,
+                             button: AXUIElement?, window: AXUIElement?) {
+        systemPromptDevice = device
+        systemPromptMessage = message
+        systemPromptButtonTitle = buttonTitle
+        systemPromptButton = button
+        systemPromptWindow = window
+        isConnectionPeek = true
+        AirPodsTrace.log("present prompt device=\(device) message=\(message) button=\(buttonTitle ?? "none")")
+        NotchUIEventBus.events.send(.expandingView(type: .peripheralBattery))
+    }
+
+    /// 只有用户点岛上的按钮时才会走到这里（13:01「不要自动连啊…我自己点」）。
+    func performSystemPromptAction() {
+        guard let button = systemPromptButton else {
+            AirPodsTrace.log("island button: no AX button, ignored")
+            return
+        }
+        let result = AXUIElementPerformAction(button, "AXPress" as CFString)
+        AirPodsTrace.log("island button pressed result=\(result.rawValue)")
+        if result != .success, let window = systemPromptWindow {
+            // helper 的安全原则：系统拒绝时把窗口还回屏幕，用户绝不能失去
+            // 操作入口。只还位置，不自动执行任何动作。
+            var origin = CGPoint(x: 320, y: 60)
+            if let position = AXValueCreate(.cgPoint, &origin) {
+                AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position)
+            }
+            AirPodsTrace.log("action refused, restored system bubble on screen")
+        }
+        systemPromptButton = nil
+        systemPromptButtonTitle = nil
+    }
+
+    private func clearSystemPrompt() {
+        systemPromptDevice = nil
+        systemPromptMessage = nil
+        systemPromptButtonTitle = nil
+        systemPromptButton = nil
+        systemPromptWindow = nil
     }
 
     /// 11-15: called by BOTH the CoreAudio output-device change and the system
@@ -723,20 +777,28 @@ enum AirPodsTrace {
     }
 }
 
-// MARK: - Hide the system Bluetooth prompt (11-15)
+// MARK: - 系统状态气泡统一收口（11-15 13:31）
 
-/// The user wants macOS's information-only AirPods prompt gone, but wants to
-/// click "Connect" personally (13:01: "不要自动连啊，跟系统一样我自己点啊").
-/// Window-list scanning needs no TCC permission; parking the window off-screen
-/// uses the same AX technique as NotificationWatcher.hide. A prompt that has a
-/// "Connect" button is left completely alone — no auto-press, no hiding — so
-/// the system confirmation works exactly as before.
+/// 用户要求「这样的弹窗都要到灵动岛统一弹窗」：macOS 在菜单栏附近画的
+/// 蓝牙/音频设备提示（连接、已转移到 iPhone、断开…）不再单独出现，
+/// 原文和它自带的按钮一起搬进灵动岛卡。
+/// 🔴 绝不自动按按钮（13:01「不要自动连啊，跟系统一样我自己点啊」）：
+/// 只有用户点岛上的按钮时，才对已挪到屏外的窗口执行 AXPress。
+/// helper 的 NotificationWatcher 已验证「窗口离屏后 AXUIElementPerformAction 仍有效」。
+
+private struct BubbleCandidate: Sendable {
+    let number: Int
+    let pid: pid_t
+    let owner: String
+}
+
 final class BluetoothPromptHider {
     static let shared = BluetoothPromptHider()
 
     private var timer: DispatchSourceTimer?
-    private var lastTriggerAt: Date = .distantPast
     private var lastSampleAt: Date = .distantPast
+    private var handledWindowNumber: Int?
+    private var handledAt: Date = .distantPast
 
     func start() {
         guard timer == nil else { return }
@@ -753,100 +815,131 @@ final class BluetoothPromptHider {
             [.excludeDesktopElements], kCGNullWindowID
         ) as? [[String: Any]] else { return }
 
-        //定期采样：万一系统弹窗的 owner 不带 "Bluetooth"，下一次连一次耳机
-        //就能从日志里看到真实窗口名，不用再猜。
+        let candidates = bubbleCandidates(in: list)
         if Date().timeIntervalSince(lastSampleAt) > 20 {
             lastSampleAt = Date()
-            let sample: [String] = list.compactMap { w in
-                guard let owner = w[kCGWindowOwnerName as String] as? String else { return nil }
-                let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
-                let wd = b["Width"] as? Double ?? 0
-                let ht = b["Height"] as? Double ?? 0
-                guard wd > 60, wd < 1000, ht > 40, ht < 800 else { return nil }
-                let name = w[kCGWindowName as String] as? String ?? ""
-                return "\(owner):\(name)"
-            }
-            AirPodsTrace.log("windows sample=\(sample.prefix(12).joined(separator: " | "))")
+            AirPodsTrace.log("bubble candidates=\(candidates.map { "\($0.owner)#\($0.number)" }.joined(separator: " | "))")
         }
-
-        var matchedPID: pid_t?
-        for w in list {
-            guard let owner = w[kCGWindowOwnerName as String] as? String else { continue }
-            let name = w[kCGWindowName as String] as? String ?? ""
-            let ownerHit = owner.localizedCaseInsensitiveContains("bluetooth")
-            let nameHit = name.localizedCaseInsensitiveContains("airpods")
-                || name.localizedCaseInsensitiveContains("蓝牙")
-            guard ownerHit || nameHit else { continue }
-            guard let b = w[kCGWindowBounds as String] as? [String: Any],
-                  let x = b["X"] as? Double, let y = b["Y"] as? Double,
-                  x > -9000, y > -9000,
-                  let width = b["Width"] as? Double, width > 60, width < 1000,
-                  let height = b["Height"] as? Double, height > 40, height < 800,
-                  let pid = w[kCGWindowOwnerPID as String] as? Int32
-            else { continue }
-            matchedPID = pid_t(pid)
-            AirPodsTrace.log("prompt owner=\(owner) name=\(name) pid=\(pid) bounds=\(b)")
-            break
-        }
-        guard let pid = matchedPID else { return }
-
-        // A prompt stays up for a few seconds; don't queue a snapshot per tick.
-        if Date().timeIntervalSince(lastTriggerAt) > 6 {
-            lastTriggerAt = Date()
+        for candidate in candidates {
             Task { @MainActor in
-                await PeripheralBatteryManager.shared.handlePossibleConnection()
+                BluetoothPromptHider.shared.handle(candidate)
             }
         }
-        hideSystemPrompt(pid: pid)
     }
 
-    private func hideSystemPrompt(pid: pid_t) {
+    /// 顶部的小浮层就是这类系统气泡的形状。不靠 owner 名字——本机实测
+    /// 气泡归属进程名里没有 "Bluetooth"，上一版因此一次都没命中。
+    private func bubbleCandidates(in list: [[String: Any]]) -> [BubbleCandidate] {
+        var out: [BubbleCandidate] = []
+        for w in list {
+            guard let owner = w[kCGWindowOwnerName as String] as? String else { continue }
+            if owner == "Notch Island" || owner == "Boring Notch" { continue }
+            let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+            let y = b["Y"] as? Double ?? 0
+            let wd = b["Width"] as? Double ?? 0
+            let ht = b["Height"] as? Double ?? 0
+            guard y >= -10, y < 120, wd >= 110, wd <= 600, ht >= 22, ht <= 130 else { continue }
+            guard let pid = w[kCGWindowOwnerPID as String] as? Int32,
+                  let number = w[kCGWindowNumber as String] as? Int else { continue }
+            out.append(BubbleCandidate(number: number, pid: pid_t(pid), owner: owner))
+        }
+        return out
+    }
+
+    @MainActor
+    private func handle(_ candidate: BubbleCandidate) {
+        if handledWindowNumber == candidate.number,
+           Date().timeIntervalSince(handledAt) < 30 { return }
         guard AXIsProcessTrusted() else {
-            AirPodsTrace.log("hide skipped: no accessibility trust")
+            AirPodsTrace.log("hider: no accessibility trust")
             return
         }
+        guard let found = inspect(candidate.pid) else { return }
+        let joined = found.texts.joined(separator: " ")
+        guard looksLikeDevicePrompt(joined) else { return }
+
+        let message = found.texts.first(where: { looksLikeStatus($0) })
+            ?? found.texts.first ?? "设备状态变化"
+        let device = found.texts.first(where: {
+            $0 != message && !looksLikeStatus($0) && $0.count <= 24
+        }) ?? "耳机"
+        var buttonTitle: String?
+        if let button = found.buttons.first {
+            buttonTitle = button.0.isEmpty ? "连接" : button.0
+        }
+
+        var hidden = CGPoint(x: -10000, y: -10000)
+        var moved = false
+        if let position = AXValueCreate(.cgPoint, &hidden) {
+            moved = AXUIElementSetAttributeValue(
+                found.window, kAXPositionAttribute as CFString, position
+            ) == .success
+        }
+        AirPodsTrace.log("bubble owner=\(candidate.owner) #\(candidate.number) texts=\(found.texts) button=\(buttonTitle ?? "none") hidden=\(moved)")
+
+        handledWindowNumber = candidate.number
+        handledAt = Date()
+        // 隐藏失败也照样弹岛卡；日志里 hidden=false 会留证，下一轮再修。
+        PeripheralBatteryManager.shared.presentSystemPrompt(
+            device: device, message: message, buttonTitle: buttonTitle,
+            button: found.buttons.first?.1, window: found.window
+        )
+    }
+
+    /// 返回该进程里第一个「文字像设备提示」的窗口，连同其文字与按钮。
+    @MainActor
+    private func inspect(_ pid: pid_t) -> (window: AXUIElement, texts: [String], buttons: [(String, AXUIElement)])? {
         let app = AXUIElementCreateApplication(pid)
         var raw: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &raw) == .success,
-              let windows = raw as? [AXUIElement] else { return }
-        for window in windows {
-            if connectButton(in: window) != nil {
-                // 11-15 13:01 user decision: do NOT press "Connect" for the
-                // user. macOS's confirmation dialog stays on screen exactly
-                // as the system intends, so the user clicks it themselves.
-                // Only information-only prompts (no button) get hidden.
-                // Once the user connects, the 4s poll picks up the new device
-                // and the island card appears on its own.
-                AirPodsTrace.log("confirmation kept: user clicks Connect")
-                continue
+              let windows = raw as? [AXUIElement] else { return nil }
+        for window in windows.prefix(16) {
+            var texts: [String] = []
+            var buttons: [(String, AXUIElement)] = []
+            collect(from: window, depth: 0, texts: &texts, buttons: &buttons)
+            if looksLikeDevicePrompt(texts.joined(separator: " ")) {
+                return (window, texts, buttons)
             }
-            var hidden = CGPoint(x: -10000, y: -10000)
-            guard let position = AXValueCreate(.cgPoint, &hidden) else { continue }
-            let moved = AXUIElementSetAttributeValue(
-                window, kAXPositionAttribute as CFString, position
-            ) == .success
-            AirPodsTrace.log("hide move=\(moved)")
-        }
-    }
-
-    private func connectButton(in element: AXUIElement, depth: Int = 0) -> AXUIElement? {
-        guard depth < 5 else { return nil }
-        var roleRaw: CFTypeRef?
-        var titleRaw: CFTypeRef?
-        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRaw)
-        AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &titleRaw)
-        if let role = roleRaw as? String, role == "AXButton",
-           let title = titleRaw as? String,
-           title.localizedCaseInsensitiveContains("连接")
-            || title.localizedCaseInsensitiveContains("connect") {
-            return element
-        }
-        var childrenRaw: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRaw) == .success,
-              let children = childrenRaw as? [AXUIElement] else { return nil }
-        for child in children.prefix(60) {
-            if let found = connectButton(in: child, depth: depth + 1) { return found }
         }
         return nil
     }
+
+    private func collect(from element: AXUIElement, depth: Int,
+                         texts: inout [String], buttons: inout [(String, AXUIElement)]) {
+        guard depth < 6 else { return }
+        var role: CFTypeRef?, title: CFTypeRef?, value: CFTypeRef?, desc: CFTypeRef?, children: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+        AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &title)
+        AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value)
+        AXUIElementCopyAttributeValue(element, kAXDescriptionAttribute as CFString, &desc)
+        for item in [title, value, desc] {
+            if let s = item as? String, !s.isEmpty, s.count < 80 { texts.append(s) }
+        }
+        if let r = role as? String, r == "AXButton" {
+            buttons.append(((title as? String) ?? (desc as? String) ?? "连接", element))
+        }
+        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
+           let kids = children as? [AXUIElement] {
+            for kid in kids.prefix(60) {
+                collect(from: kid, depth: depth + 1, texts: &texts, buttons: &buttons)
+            }
+        }
+    }
+
+    private func looksLikeDevicePrompt(_ text: String) -> Bool {
+        let t = text.lowercased()
+        return ["airpods", "蓝牙", "连接", "connect", "转移", "iphone", "已断开", "耳机"]
+            .contains { t.contains($0) }
+    }
+
+    private func looksLikeStatus(_ text: String) -> Bool {
+        let t = text.lowercased()
+        return ["转移", "连接", "断开", "iphone", "已", "connect", "disconnect"]
+            .contains { t.contains($0) }
+    }
 }
+
+// The timer callbacks run on a fixed background queue while all state reads
+// and writes happen inside @MainActor methods; there is no shared mutable
+// state crossing the boundary.
+extension BluetoothPromptHider: @unchecked Sendable {}

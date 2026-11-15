@@ -458,7 +458,11 @@ final class BoringViewCoordinator: ObservableObject {
         didSet {
             if expandingView.show {
                 expandingViewTask?.cancel()
-                let duration: TimeInterval = (expandingView.type == .download ? 2 : 3)
+                // 13:31: the system bubble's button now lives on the island
+                // card — 3s is not enough to read and click it. Other peeks
+                // keep their original timing.
+                let duration: TimeInterval = expandingView.type == .download ? 2
+                    : (expandingView.type == .peripheralBattery ? 8 : 3)
                 let currentType = expandingView.type
                 expandingViewTask = Task { [weak self] in
                     try? await Task.sleep(for: .seconds(duration))

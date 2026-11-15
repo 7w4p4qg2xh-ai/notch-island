@@ -1583,6 +1583,11 @@ struct ContentView: View {
         let device = peripheralBatteryModel.peekDevice
         let level = device?.overallLevel
         let fraction = CGFloat(level ?? 0) / 100.0
+        // 13:31: 系统气泡统一进岛后，卡上要显示系统原文 + 它自带的按钮，
+        // 用户自己点；按钮比原来的「盒 xx%」宽，文字列相应让出 25pt。
+        let prompt = peripheralBatteryModel.systemPromptMessage
+        let hasPromptButton = peripheralBatteryModel.systemPromptButtonTitle != nil
+        let textWidth = islandConnectionTextWidth - (hasPromptButton ? 25 : 0)
         HStack(spacing: 12) {
             Image(systemName: peripheralBatteryModel.peekIcon)
                 .font(.system(size: 30, weight: .medium))
@@ -1591,26 +1596,46 @@ struct ContentView: View {
                 .shadow(color: .black.opacity(0.55), radius: 1)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(device?.name ?? "耳机")
+                Text(peripheralBatteryModel.systemPromptDevice ?? device?.name ?? "耳机")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .shadow(color: .black.opacity(0.55), radius: 1)
-                Text("已连接")
+                Text(prompt ?? "已连接")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                     .shadow(color: .black.opacity(0.55), radius: 1)
             }
-            .frame(width: islandConnectionTextWidth, alignment: .leading)
+            .frame(width: textWidth, alignment: .leading)
 
             Spacer(minLength: 0)
 
-            if let caseLevel = device?.caseLevel {
+            if prompt == nil, let caseLevel = device?.caseLevel {
                 Text("盒 \(caseLevel)%")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.white.opacity(0.8))
                     .shadow(color: .black.opacity(0.55), radius: 1)
+            }
+
+            if let buttonTitle = peripheralBatteryModel.systemPromptButtonTitle {
+                Button {
+                    // 只有用户点这里才会去按系统按钮；app 绝不代劳。
+                    peripheralBatteryModel.performSystemPromptAction()
+                } label: {
+                    Text(buttonTitle)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .overlay(
+                            Capsule().stroke(Color.white.opacity(0.55), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
             }
 
             ZStack {
