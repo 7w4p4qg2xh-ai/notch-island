@@ -309,7 +309,13 @@ final class BoringViewCoordinator: ObservableObject {
                 }
             }
 
-            if let targetUUID = targetScreenUUID {
+            // 11-15: brightness events carry the menu-bar / built-in display's
+            // UUID, but the floating island lives on the external display and
+            // would never receive them. Volume/backlight already broadcast to
+            // every screen, so do the same for brightness instead of silently
+            // dropping the OSD on the island.
+            let effectiveTarget = type == .brightness ? nil : targetScreenUUID
+            if let targetUUID = effectiveTarget {
                 // Update specific screen
                 updateState(for: targetUUID)
             } else {

@@ -16,7 +16,24 @@ struct InlineOSD: View {
     @Binding var accent: Color?
     @Binding var hoverAnimation: Bool
     @Binding var gestureProgress: CGFloat
+
+    /// The hardware-notch display keeps the stock layout, where a black
+    /// rectangle masks the camera cutout between the label and the slider.
+    /// An external display has no cutout: that rectangle would paint a solid
+    /// black bar right through the centre of the clear glass (docs/04 C10/P7).
+    private var usesFloatingIsland: Bool {
+        !vm.hasNotch && Defaults[.floatingPillOnNonNotchDisplay]
+    }
+
     var body: some View {
+        if usesFloatingIsland {
+            floatingIslandOSD
+        } else {
+            notchOSD
+        }
+    }
+
+    private var notchOSD: some View {
         HStack {
             HStack(spacing: 5) {
                 OSDIconView(eventType: type, icon: icon, value: value, accent: accent)
@@ -77,6 +94,51 @@ struct InlineOSD: View {
             .frame(width: 100 - (hoverAnimation ? 0 : 12) + gestureProgress / 2, height: vm.closedNotchSize.height - (hoverAnimation ? 0 : 12), alignment: .center)
         }
         .frame(height: vm.closedNotchSize.height + (hoverAnimation ? 8 : 0), alignment: .center)
+    }
+
+    /// Island OSD: one centred row, no camera mask, no fill. The width is
+    /// fixed so the capsule grows to a predictable pill; the height comes from
+    /// the content plus symmetric padding (docs/04 L8, AGENTS §3.5). Left and
+    /// right insets match, so the row's visible centre is the plate's centre.
+    private var floatingIslandOSD: some View {
+        HStack(spacing: 10) {
+            OSDIconView(eventType: type, icon: icon, value: value, accent: accent)
+                .frame(width: 22)
+
+            if eventType == .mic {
+                Text(value > 0 ? "麦克风已开" : "麦克风已静音")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.55), radius: 1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                DraggableProgressBar(value: $value, onChange: { v in
+                    if type == .volume {
+                        VolumeManager.shared.setAbsolute(Float32(v))
+                    } else if type == .brightness {
+                        BrightnessManager.shared.setAbsolute(value: Float32(v))
+                    }
+                }, accentColor: accent, compact: true)
+                .frame(maxWidth: .infinity)
+
+                Group {
+                    if type == .volume && value.isZero {
+                        Text("静音")
+                    } else {
+                        Text(value, format: .percent.precision(.fractionLength(0)))
+                    }
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white)
+                .monospacedDigit()
+                .shadow(color: .black.opacity(0.55), radius: 1)
+                .frame(width: 38, alignment: .trailing)
+            }
+        }
+        .imageScale(.medium)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .frame(width: 300)
     }
 
     func osdTypeName(_ type: SneakContentType) -> String {

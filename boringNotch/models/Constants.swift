@@ -561,8 +561,12 @@ extension Defaults.Keys {
     static let selectedDownloadIconStyle = Key<DownloadIconStyle>("selectedDownloadIconStyle", default: DownloadIconStyle.onlyAppIcon)
 
     // MARK: OSD
-    static let osdReplacement = Key<Bool>(PreferenceCompatibility.migratedKeyName("osdReplacement", from: "hudReplacement"), default: false)
-    static let inlineOSD = Key<Bool>(PreferenceCompatibility.migratedKeyName("inlineOSD", from: "inlineHUD"), default: false)
+    // 11-15: the island is meant to own the system brightness/volume OSD, so
+    // both switches are on out of the box. On a hardware-notch display the
+    // stock inline layout is unchanged; the floating island gets its own row
+    // (InlineOSD.floatingIslandOSD) with no camera-mask rectangle.
+    static let osdReplacement = Key<Bool>(PreferenceCompatibility.migratedKeyName("osdReplacement", from: "hudReplacement"), default: true)
+    static let inlineOSD = Key<Bool>(PreferenceCompatibility.migratedKeyName("inlineOSD", from: "inlineHUD"), default: true)
 
     // MARK: Layout
     /// Swaps the opened notch for a smaller, player-only layout: no tab

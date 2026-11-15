@@ -1,4 +1,5 @@
 import Combine
+import CoreAudio
 import Defaults
 import Foundation
 import IOKit
@@ -389,6 +390,29 @@ struct PeripheralDeviceBattery: Equatable {
 
     var hasBattery: Bool { main != nil || left != nil || right != nil || caseLevel != nil }
     var lowestLevel: Int? { [main, left, right, caseLevel].compactMap { $0 }.min() }
+
+    /// 11-15: the iPhone-style connection card shows ONE overall ring. For
+    /// two-piece earbuds the lower bud is the honest answer — using the higher
+    /// one would read as "full" while one bud is nearly dead. Single devices
+    /// fall back to their main level, then to the charging case.
+    var overallLevel: Int? {
+        if let left, let right { return min(left, right) }
+        if let left { return left }
+        if let right { return right }
+        if let main { return main }
+        return caseLevel
+    }
+
+    /// AirPods / Beats / generic headphones. Keyboards and mice keep the old
+    /// one-line text pill; only headphones get the connection card.
+    var looksLikeHeadphones: Bool {
+        if icon == "headphones" { return true }
+        let name = self.name.lowercased()
+        return name.contains("airpods")
+            || name.contains("beats")
+            || name.contains("headphone")
+            || name.contains("耳机")
+    }
 }
 
 /// Polls `system_profiler SPBluetoothDataType` (public API, no private
@@ -404,10 +428,16 @@ final class PeripheralBatteryManager: ObservableObject {
     @Published private(set) var connectedDevices: [PeripheralDeviceBattery] = []
     /// The device the current peek pill is showing.
     @Published private(set) var peekDevice: PeripheralDeviceBattery?
+    /// 11-15: true only for a fresh headphone connection (the iPhone-style
+    /// card). Low-battery alerts and non-headphone devices keep the old
+    /// one-line text pill.
+    @Published private(set) var isConnectionPeek: Bool = false
 
     private var pollTask: Task<Void, Never>?
     private var knownDevices: [PeripheralDeviceBattery] = []
     private var alertedLowDevices: Set<String> = []
+    /// CoreAudio can fire several times for one pairing; don't re-greet.
+    private var lastConnectionPeekAt: [String: Date] = [:]
     private var cancellables: [AnyCancellable] = []
 
     private init() {
@@ -423,6 +453,19 @@ final class PeripheralBatteryManager: ObservableObject {
 
     func start() {
         guard pollTask == nil else { return }
+        AudioDeviceConnectionWatcher.shared.start()
+        // 11-15: a baseline taken shortly after launch lets the instant
+        // connection trigger tell a NEW pairing from something already
+        // connected. The 15s / 30s poll loop below is deliberately untouched.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            guard knownDevices.isEmpty else { return }
+            let baseline = await Self.fetchSnapshot()
+            if knownDevices.isEmpty {
+                knownDevices = baseline
+                connectedDevices = baseline
+            }
+        }
         pollTask = Task { [weak self] in
             // Give launch some breathing room; system_profiler is not cheap.
             try? await Task.sleep(for: .seconds(15))
@@ -464,8 +507,10 @@ final class PeripheralBatteryManager: ObservableObject {
         for device in snapshot where device.hasBattery {
             guard let old = previousByName[device.name] else {
                 // Newly connected: greet it and (re)arm the low-battery alert.
+                // Headphones get the iPhone-style connection card; everything
+                // else keeps the old one-line text pill (11-15).
                 alertedLowDevices.remove(device.name)
-                peek(device)
+                peek(device, isConnection: device.looksLikeHeadphones)
                 continue
             }
             if device == old { continue }
@@ -488,9 +533,36 @@ final class PeripheralBatteryManager: ObservableObject {
         return true
     }
 
-    private func peek(_ device: PeripheralDeviceBattery) {
+    private func peek(_ device: PeripheralDeviceBattery, isConnection: Bool = false) {
+        if isConnection {
+            if let last = lastConnectionPeekAt[device.name],
+               Date().timeIntervalSince(last) < 30 { return }
+            lastConnectionPeekAt[device.name] = Date()
+        }
         peekDevice = device
+        isConnectionPeek = isConnection
         NotchUIEventBus.events.send(.expandingView(type: .peripheralBattery))
+    }
+
+    /// 11-15: called the instant the default output device changes. CoreAudio
+    /// fires before bluetoothd has published battery levels, so wait briefly
+    /// and take a fresh snapshot instead of waiting for the 30s poll.
+    func handlePossibleConnection() async {
+        guard Defaults[.peripheralBatteryEnabled] else { return }
+        try? await Task.sleep(for: .milliseconds(800))
+        let snapshot = await Self.fetchSnapshot()
+        let previous = knownDevices
+        knownDevices = snapshot
+        connectedDevices = snapshot
+        // Same baseline rule as process(): don't greet devices that were
+        // already paired before the app had a chance to look.
+        guard !previous.isEmpty else { return }
+        let previousNames = Set(previous.map(\.name))
+        for device in snapshot where device.hasBattery && device.looksLikeHeadphones {
+            guard !previousNames.contains(device.name) else { continue }
+            peek(device, isConnection: true)
+            return
+        }
     }
 
     /// Left-of-notch text for the peek pill, e.g.
@@ -580,5 +652,41 @@ final class PeripheralBatteryManager: ObservableObject {
         if type.contains("game") { return "gamecontroller" }
         if type.contains("speaker") { return "hifispeaker" }
         return "dot.radiowaves.left.and.right"
+    }
+}
+
+// MARK: - Instant headphone connection trigger (11-15)
+
+/// CoreAudio reports the default output device changing the moment AirPods
+/// take over. Polling alone took up to 30s, so the connection card arrived
+/// long after the earbuds were already in. This is a public API with no TCC
+/// prompt — the app already listens to the same property in VolumeManager.
+/// Appended here rather than in a new .swift file (pbxproj discipline).
+final class AudioDeviceConnectionWatcher {
+    static let shared = AudioDeviceConnectionWatcher()
+
+    private var started = false
+    private var address: AudioObjectPropertyAddress?
+    private var listener: AudioObjectPropertyListenerBlock?
+    private let queue = DispatchQueue(label: "com.notchisland.audio-device-watcher")
+
+    func start() {
+        guard !started else { return }
+        started = true
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let block: AudioObjectPropertyListenerBlock = { _, _ in
+            Task { @MainActor in
+                await PeripheralBatteryManager.shared.handlePossibleConnection()
+            }
+        }
+        guard AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &addr, queue, block
+        ) == noErr else { return }
+        address = addr
+        listener = block
     }
 }

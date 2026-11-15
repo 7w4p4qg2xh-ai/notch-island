@@ -156,12 +156,27 @@ struct ContentView: View {
     /// restore bookkeeping. Playing only: pausing collapses back to the
     /// 185×24 capsule. Gated on `usesFloatingIsland` so the built-in notched
     /// display keeps its original music live activity untouched.
+    /// 11-15: iPhone-style headphone connection card. Reuses the notification
+    /// / music card's 408pt width and continuous corners, so the island grows
+    /// into ONE object rather than swapping plates. Only on the floating
+    /// island: the hardware-notch display keeps its original one-line pill.
+    private var showsConnectionCard: Bool {
+        usesFloatingIsland
+            && vm.notchState == .closed
+            && !vm.hideOnClosed
+            && coordinator.expandingView.show
+            && coordinator.expandingView.type == .peripheralBattery
+            && Defaults[.peripheralBatteryEnabled]
+            && peripheralBatteryModel.isConnectionPeek
+    }
+
     private var showsMusicCard: Bool {
         guard islandMusicCardEnabled,
               usesFloatingIsland,
               allowsNowPlayingCard,
               vm.notchState == .closed,
               !vm.hideOnClosed,
+              !showsConnectionCard,
               // A volume/brightness HUD draws in the same closed slot. If the
               // plate stayed 408×66 while that row is on top, it would be a
               // wide empty card (docs/04 F: judge by content, not by notch).
@@ -339,7 +354,7 @@ struct ContentView: View {
             // a 33pt radius and read as a long pill, not the 6.2:1 card the
             // user asked for. The small 185×24 capsule stays a Capsule —
             // its radius follows the ACTUAL plate height (docs/04 L2).
-            if showsMusicCard {
+            if showsMusicCard || showsConnectionCard {
                 return NotchShape(
                     topCornerRadius: islandCardRadius,
                     bottomCornerRadius: islandCardRadius,
@@ -515,7 +530,7 @@ struct ContentView: View {
             chinWidth = 640
         } else if coordinator.expandingView.type == .peripheralBattery && coordinator.expandingView.show
             && vm.notchState == .closed && Defaults[.peripheralBatteryEnabled] {
-            chinWidth = 640
+            chinWidth = showsConnectionCard ? islandCardWidth : 640
         } else if vm.notchState == .closed, !vm.hideOnClosed, let activity = selectedActivity {
             // Sized for whichever activity is actually on top, not for
             // whichever happens to exist — otherwise swiping to music while a
@@ -646,6 +661,7 @@ struct ContentView: View {
     private var floatingIslandSize: CGSize {
         if showsNotificationCard { return islandNotificationSize }
         if showsMusicCard { return islandMusicSize }
+        if showsConnectionCard { return islandMusicSize }
         if vm.notchState == .open { return islandPanelSize }
         return floatingPillSize
     }
@@ -810,7 +826,7 @@ struct ContentView: View {
                                 // text lines as a notification, so it takes
                                 // the same uniform wash. The 24pt capsule
                                 // stays at 0.25 or it reads as black again.
-                                minimumScrim: (showsNotificationCard || showsMusicCard)
+                                minimumScrim: (showsNotificationCard || showsMusicCard || showsConnectionCard)
                                     ? 0.35
                                     : closedPillScrim,
                                 // The closed island is glass too — one material
@@ -1131,6 +1147,9 @@ struct ContentView: View {
                             .frame(width: 76, alignment: .trailing)
                         }
                         .frame(height: displayClosedNotchHeight, alignment: .center)
+                        } else if showsConnectionCard {
+                            islandConnectionCard
+                                .transition(.opacity)
                         } else if coordinator.expandingView.type == .peripheralBattery && coordinator.expandingView.show
                             && vm.notchState == .closed && Defaults[.peripheralBatteryEnabled] {
                             HStack(spacing: 0) {
@@ -1547,6 +1566,76 @@ struct ContentView: View {
             .split(separator: "\n")
             .map(String.init)
             .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? ""
+    }
+
+    /// 408 − 28 insets − 42 icon − 40 ring − 45 case caption − 4 gaps.
+    private var islandConnectionTextWidth: CGFloat {
+        islandCardWidth - 28 - 42 - 40 - 45 - 12 * 4
+    }
+
+    /// 11-15: iPhone-style AirPods connection card. ONE overall battery ring
+    /// (the lower of the two buds), charging case as a small caption. Every
+    /// mark here is text or a stroke — no fill over the centre, so the liquid
+    /// glass stays pure (docs/04 P7 / Q2). Height comes from the content plus
+    /// symmetric vertical padding, never from maxHeight:.infinity (L8).
+    @ViewBuilder
+    private var islandConnectionCard: some View {
+        let device = peripheralBatteryModel.peekDevice
+        let level = device?.overallLevel
+        let fraction = CGFloat(level ?? 0) / 100.0
+        HStack(spacing: 12) {
+            Image(systemName: peripheralBatteryModel.peekIcon)
+                .font(.system(size: 30, weight: .medium))
+                .foregroundStyle(.white)
+                .frame(width: 42, height: 42)
+                .shadow(color: .black.opacity(0.55), radius: 1)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(device?.name ?? "耳机")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .shadow(color: .black.opacity(0.55), radius: 1)
+                Text("已连接")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .shadow(color: .black.opacity(0.55), radius: 1)
+            }
+            .frame(width: islandConnectionTextWidth, alignment: .leading)
+
+            Spacer(minLength: 0)
+
+            if let caseLevel = device?.caseLevel {
+                Text("盒 \(caseLevel)%")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .shadow(color: .black.opacity(0.55), radius: 1)
+            }
+
+            ZStack {
+                Circle()
+                    .stroke(Color.white.opacity(0.25), lineWidth: 3)
+                if let level {
+                    Circle()
+                        .trim(from: 0, to: max(0.02, fraction))
+                        .stroke(
+                            level <= 20 ? Color.red : Color.white,
+                            style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                    Text("\(level)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .monospacedDigit()
+                        .shadow(color: .black.opacity(0.55), radius: 1)
+                }
+            }
+            .frame(width: 40, height: 40)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(width: islandCardWidth, alignment: .leading)
     }
 
     @ViewBuilder
