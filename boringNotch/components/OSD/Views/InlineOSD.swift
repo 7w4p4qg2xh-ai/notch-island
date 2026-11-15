@@ -105,7 +105,7 @@ struct InlineOSD: View {
             OSDIconView(eventType: type, icon: icon, value: value, accent: accent)
                 .frame(width: 22)
 
-            if eventType == .mic {
+            if type == .mic {
                 Text(value > 0 ? "麦克风已开" : "麦克风已静音")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white)

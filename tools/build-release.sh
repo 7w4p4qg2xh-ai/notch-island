@@ -52,9 +52,11 @@ xcodebuild \
     CODE_SIGN_IDENTITY=- \
     CODE_SIGNING_REQUIRED=YES \
     CODE_SIGNING_ALLOWED=YES \
-    build 2>&1 | tail -20
+    build 2>&1 | tee /tmp/notch-island-full-build.log | tail -40
 
-rc=${PIPESTATUS[0]}
+# Keep the full xcodebuild output on disk: tail -20 used to swallow every
+# "error:" line, leaving only "(4 failures)" with no way to diagnose it.
+rc=${PIPESTATUS[0]:-1}
 echo "=== xcodebuild rc=$rc ==="
 if [[ $rc -ne 0 ]]; then
     echo "编译失败，上面是最后 20 行。完整日志可用 -quiet 之外的方式重跑。"
