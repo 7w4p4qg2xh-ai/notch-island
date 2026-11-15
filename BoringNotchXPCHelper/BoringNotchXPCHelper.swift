@@ -347,16 +347,29 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
 
     @objc func adjustScreenBrightness(by value: Float, with reply: @escaping (NSNumber?) -> Void) {
         let displayID = brightnessDisplayID()
-        if displayServicesSetBrightnessSmooth(displayID: displayID, value: value) {
-            // Read back inside the helper so the client pays for one RPC
-            // instead of two (adjust + currentScreenBrightness).
-            var b: Float = 0
-            if displayServicesGetBrightness(displayID: displayID, out: &b) {
-                reply(NSNumber(value: b))
+        // 11-15 23:32：`DisplayServicesSetBrightnessSmooth` 要的是**绝对亮度**（0…1），
+        // 不是增量。这里原先直接把 ±1/16 的 delta 传进去，等于每按一次都把屏幕
+        // 设成 6%（或负数被 clamp 到 0），用户按「加亮度」看到的是屏幕变暗。
+        // 这条分支以前从没真正跑过——亮度键在 macOS 27 上收不到，也就没人踩到。
+        // 现在先读当前值、加上增量、再设绝对目标。
+        var current: Float = 0
+        if displayServicesGetBrightness(displayID: displayID, out: &current) {
+            let target = max(0, min(1, current + value))
+            // 23:34 实测：macOS 27 上 `DisplayServicesSetBrightnessSmooth` 是
+            // 空操作——rc=0 但亮度纹丝不动（0.60、0.35 都试过，读回仍是 1.0），
+            // 只有非 Smooth 的 `DisplayServicesSetBrightness` 真生效（0.90 → 0.9）。
+            // 所以这里必须用非 Smooth 版本，代价是没有系统那种渐变动画。
+            if displayServicesSetBrightness(displayID: displayID, value: target) {
+                // Read back inside the helper so the client pays for one RPC
+                // instead of two (adjust + currentScreenBrightness).
+                var b: Float = 0
+                if displayServicesGetBrightness(displayID: displayID, out: &b) {
+                    reply(NSNumber(value: b))
+                    return
+                }
+                reply(NSNumber(value: target))
                 return
             }
-            reply(nil)
-            return
         }
         if let io = ioServiceFor(displayID: displayID) {
             var ioCurrent: Float = 0

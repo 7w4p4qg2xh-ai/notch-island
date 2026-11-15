@@ -169,6 +169,32 @@ struct ContentView: View {
             && Defaults[.peripheralBatteryEnabled]
     }
 
+    /// 11-16：内建刘海屏上的同一张耳机卡。
+    ///
+    /// 以前这条路走的是上游的「一行胶囊」：`[文字][摄像头黑块][图标]` 铺在
+    /// 一块贴屏幕顶边的黑牌里。AirPods 的摘要最长是
+    /// 「AP5 — L 100% · R 100% · Case 66%」，为了塞下它
+    /// `computedChinWidth` 被撑到 640pt —— 于是屏幕正中间横着一条 640 的黑带：
+    /// 文字挤在左端、图标被推到 200pt 外的右端、菜单栏被压住。
+    /// 外接屏那边一直是 408 的卡，所以两屏看起来完全不是一个东西。
+    ///
+    /// 现在内建屏也画这张卡。它不能贴屏幕顶边（那里是硬件摄像头），
+    /// 所以整块牌下沉到刘海下方、四角同半径，浮在菜单栏底下。
+    private var showsNotchConnectionCard: Bool {
+        !usesFloatingIsland
+            && vm.hasNotch
+            && vm.notchState == .closed
+            && !vm.hideOnClosed
+            && coordinator.expandingView.show
+            && coordinator.expandingView.type == .peripheralBattery
+            && Defaults[.peripheralBatteryEnabled]
+    }
+
+    /// 卡片离屏幕顶边的距离：硬件刘海高度 + 8pt 透气。
+    private var notchConnectionCardTopGap: CGFloat {
+        showsNotchConnectionCard ? displayClosedNotchHeight + 8 : 0
+    }
+
     private var showsMusicCard: Bool {
         guard islandMusicCardEnabled,
               usesFloatingIsland,
@@ -302,6 +328,16 @@ struct ContentView: View {
     }
 
     private var currentNotchShape: NotchShape {
+        // 内建屏的耳机卡是「浮在刘海下方的一张卡」，四角同半径。
+        // 贴屏幕顶边就会在菜单栏里留一条黑带（23:34 截图里被骂的就是它）。
+        if showsNotchConnectionCard {
+            return NotchShape(
+                topCornerRadius: islandCardRadius,
+                bottomCornerRadius: islandCardRadius,
+                usesContinuousCorners: true
+            )
+        }
+
         // On a notch-less display there is no cutout to blend into, so the
         // notification grows out of the floating capsule instead: the top
         // corners stay rounded and the whole card keeps a gap from the screen
@@ -535,7 +571,10 @@ struct ContentView: View {
             chinWidth = usesFloatingIsland ? 240 : 640
         } else if coordinator.expandingView.type == .peripheralBattery && coordinator.expandingView.show
             && vm.notchState == .closed && Defaults[.peripheralBatteryEnabled] {
-            chinWidth = usesFloatingIsland ? islandCardWidth : 640
+            // 23:36 → 11-16：两屏现在画的是同一张卡，宽度也统一按卡片宽度走。
+            // 原来内建屏按文字长度撑到 640，就是为了塞下那句摘要 ——
+            // 代价是菜单栏中间横一条黑带。卡片自己会截断/让位，不需要撑宽。
+            chinWidth = islandCardWidth
         } else if vm.notchState == .closed, !vm.hideOnClosed, let activity = selectedActivity {
             // Sized for whichever activity is actually on top, not for
             // whichever happens to exist — otherwise swiping to music while a
@@ -784,7 +823,10 @@ struct ContentView: View {
                         .horizontal,
                         vm.notchState == .open
                             ? openedInsets.top
-                            : (islandOwnsPlate ? 0 : cornerRadiusInsets.closed.bottom)
+                            // 内建屏的耳机卡和浮岛卡一样，宽度就是卡片自己的
+                            // 宽度，外面不能再套一层闭态左右内边距，否则
+                            // 408 的卡会被撑成 408 + 2×12。
+                            : ((islandOwnsPlate || showsNotchConnectionCard) ? 0 : cornerRadiusInsets.closed.bottom)
                     )
                     // Symmetric on the island. It used to pad the bottom only,
                     // which is correct for an edge-anchored plate (the top
@@ -902,6 +944,11 @@ struct ContentView: View {
                              : ((isNotchHeightZero && vm.notchState == .closed) ? 0.01 : 1))
 
                 mainLayout
+                    // 11-16：内建屏耳机卡整块下沉到硬件刘海下方。
+                    // 必须加在 `mainLayout` 外面 —— 牌子的 background 是在
+                    // mainLayout 内部画的，写在里面那 32pt 空白也会被涂黑，
+                    // 又变成菜单栏里的一条黑带。
+                    .padding(.top, notchConnectionCardTopGap)
                     // alignment: .top matters here — without it this frame
                     // defaults to centering, and shrinking the height for a
                     // notification (openNotchHeight < vm.notchSize.height)
@@ -1166,26 +1213,12 @@ struct ContentView: View {
                                 .transition(.opacity)
                         } else if coordinator.expandingView.type == .peripheralBattery && coordinator.expandingView.show
                             && vm.notchState == .closed && Defaults[.peripheralBatteryEnabled] {
-                            HStack(spacing: 0) {
-                                HStack {
-                                    Text(peripheralBatteryModel.peekSummary ?? "")
-                                        .font(.subheadline)
-                                        .foregroundStyle(.white)
-                                        .lineLimit(1)
-                                }
-
-                                Rectangle()
-                                    .fill(.black)
-                                    .frame(width: vm.closedNotchSize.width + 10)
-
-                                HStack {
-                                    Image(systemName: peripheralBatteryModel.peekIcon)
-                                        .font(.system(size: 18, weight: .medium))
-                                        .foregroundStyle(.white)
-                                }
-                                .frame(width: 76, alignment: .trailing)
-                            }
-                            .frame(height: displayClosedNotchHeight, alignment: .center)
+                            // 11-16：内建屏不再画「[文字][摄像头黑块][图标]」那一行，
+                            // 直接复用外接屏那张 408 的卡（图标 42 / 设备名 / 状态 /
+                            // 盒子百分比 / 电量圆环）。卡片宽度、圆角、文字列宽度
+                            // 全部由 `islandConnectionCard` 自己定，这里不再补 frame。
+                            islandConnectionCard
+                                .transition(.opacity)
                         } else if coordinator.shouldShowSneakPeek(on: vm.screenUUID) && (usesFloatingIsland || Defaults[.inlineOSD]) && (coordinator.sneakPeekState(for: vm.screenUUID).type != .music) && (coordinator.sneakPeekState(for: vm.screenUUID).type != .battery) && vm.notchState == .closed {
                            InlineOSD(
                               type: coordinator.binding(for: vm.screenUUID).type,
