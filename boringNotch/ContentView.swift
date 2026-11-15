@@ -1602,7 +1602,7 @@ struct ContentView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .shadow(color: .black.opacity(0.55), radius: 1)
-                Text(prompt ?? "已连接")
+                Text(prompt ?? peripheralBatteryModel.islandStatusMessage ?? "已连接")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.85))
                     .lineLimit(1)

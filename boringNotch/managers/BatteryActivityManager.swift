@@ -441,6 +441,9 @@ final class PeripheralBatteryManager: ObservableObject {
     @Published private(set) var systemPromptDevice: String?
     @Published private(set) var systemPromptMessage: String?
     @Published private(set) var systemPromptButtonTitle: String?
+    /// 15:04: 岛卡状态文案。系统气泡（「已转移到 iPad」）不在 AX 树里，
+    /// 读不到原文，但至少不能继续错误地写着「已连接」。
+    @Published private(set) var islandStatusMessage: String?
     private var systemPromptButton: AXUIElement?
     private var systemPromptWindow: AXUIElement?
 
@@ -540,6 +543,20 @@ final class PeripheralBatteryManager: ObservableObject {
                 alertedLowDevices.remove(device.name)
             }
         }
+
+        // 15:04: a headphone that disappears shortly after a connection peek
+        // is macOS handing it over to iPhone/iPad. The system bubble stays on
+        // screen (it is NOT an AX window — docs/04 S8), so the island must at
+        // least tell the truth instead of still saying "已连接".
+        let currentNames = Set(snapshot.map(\.name))
+        for old in previous where old.looksLikeHeadphones && !currentNames.contains(old.name) {
+            guard let last = lastConnectionPeekAt[old.name],
+                  Date().timeIntervalSince(last) < 90,
+                  Date().timeIntervalSince(last) > 4 else { continue }
+            lastConnectionPeekAt.removeValue(forKey: old.name)
+            peekTransferred(old)
+            break
+        }
     }
 
     private func crossedLowThreshold(old: PeripheralDeviceBattery, new: PeripheralDeviceBattery) -> Bool {
@@ -557,8 +574,20 @@ final class PeripheralBatteryManager: ObservableObject {
         }
         peekDevice = device
         isConnectionPeek = isConnection
+        islandStatusMessage = isConnection ? "已连接" : "电量偏低"
         clearSystemPrompt()
         AirPodsTrace.log("peek name=\(device.name) connection=\(isConnection) level=\(device.overallLevel.map(String.init) ?? "-")")
+        NotchUIEventBus.events.send(.expandingView(type: .peripheralBattery))
+    }
+
+    /// 设备被切到别的 Apple 设备：岛卡显示真实状态，系统气泡照常留着
+    /// （用户 15:04 选「先不动系统设置」，那边按钮还能自己点）。
+    private func peekTransferred(_ device: PeripheralDeviceBattery) {
+        peekDevice = device
+        isConnectionPeek = true
+        islandStatusMessage = "已转移到其它设备"
+        clearSystemPrompt()
+        AirPodsTrace.log("peek transferred name=\(device.name)")
         NotchUIEventBus.events.send(.expandingView(type: .peripheralBattery))
     }
 
