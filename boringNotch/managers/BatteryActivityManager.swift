@@ -736,9 +736,11 @@ final class BluetoothPromptHider {
     private var timer: DispatchSourceTimer?
     private var lastTriggerAt: Date = .distantPast
     private var lastSampleAt: Date = .distantPast
+    private var lastPressAt: Date = .distantPast
 
     func start() {
         guard timer == nil else { return }
+        AirPodsTrace.log("hider start axTrusted=\(AXIsProcessTrusted())")
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         t.schedule(deadline: .now() + 1, repeating: 1)
         t.setEventHandler { [weak self] in self?.scan() }
@@ -808,8 +810,17 @@ final class BluetoothPromptHider {
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &raw) == .success,
               let windows = raw as? [AXUIElement] else { return }
         for window in windows {
-            if hasConnectButton(window) {
-                AirPodsTrace.log("hide skipped: prompt has a Connect button")
+            if let button = connectButton(in: window) {
+                // macOS often asks the user to confirm ("Connect"). Pressing
+                // it is what actually connects the earbuds — parking the
+                // dialog without pressing would leave them unpaired and the
+                // island card would have no battery to show. Once pressed the
+                // system dismisses its own dialog; no window move needed.
+                if Date().timeIntervalSince(lastPressAt) > 10 {
+                    lastPressAt = Date()
+                    let pressed = AXUIElementPerformAction(button, "AXPress" as CFString) == .success
+                    AirPodsTrace.log("press Connect=\(pressed)")
+                }
                 continue
             }
             var hidden = CGPoint(x: -10000, y: -10000)
@@ -821,8 +832,8 @@ final class BluetoothPromptHider {
         }
     }
 
-    private func hasConnectButton(_ element: AXUIElement, depth: Int = 0) -> Bool {
-        guard depth < 5 else { return false }
+    private func connectButton(in element: AXUIElement, depth: Int = 0) -> AXUIElement? {
+        guard depth < 5 else { return nil }
         var roleRaw: CFTypeRef?
         var titleRaw: CFTypeRef?
         AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRaw)
@@ -831,14 +842,14 @@ final class BluetoothPromptHider {
            let title = titleRaw as? String,
            title.localizedCaseInsensitiveContains("连接")
             || title.localizedCaseInsensitiveContains("connect") {
-            return true
+            return element
         }
         var childrenRaw: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRaw) == .success,
-              let children = childrenRaw as? [AXUIElement] else { return false }
-        for child in children.prefix(60) where hasConnectButton(child, depth: depth + 1) {
-            return true
+              let children = childrenRaw as? [AXUIElement] else { return nil }
+        for child in children.prefix(60) {
+            if let found = connectButton(in: child, depth: depth + 1) { return found }
         }
-        return false
+        return nil
     }
 }
