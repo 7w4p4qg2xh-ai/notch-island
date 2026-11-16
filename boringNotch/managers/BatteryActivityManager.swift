@@ -407,8 +407,14 @@ struct PeripheralDeviceBattery: Equatable {
 
     /// AirPods / Beats / generic headphones. Keyboards and mice keep the old
     /// one-line text pill; only headphones get the connection card.
+    ///
+    /// 11-16: 图标现在是分机型的（`airpodspro` / `airpodsmax` / `beats.*`），
+    /// 只认 `== "headphones"` 会把改名成「AP5」的 AirPods 判成非耳机，
+    /// 连接卡直接不弹 —— 所以按前缀一起认。
     var looksLikeHeadphones: Bool {
-        if icon == "headphones" { return true }
+        if icon == "headphones" || icon.hasPrefix("airpods") || icon.hasPrefix("beats") {
+            return true
+        }
         let name = self.name.lowercased()
         return name.contains("airpods")
             || name.contains("beats")
@@ -732,7 +738,12 @@ final class PeripheralBatteryManager: ObservableObject {
                 devices.append(
                     PeripheralDeviceBattery(
                         name: name,
-                        icon: icon(for: minorType),
+                        icon: icon(
+                            for: minorType,
+                            name: name,
+                            productID: hexValue(properties["device_productID"]),
+                            vendorID: hexValue(properties["device_vendorID"])
+                        ),
                         main: percentValue(properties["device_batteryLevelMain"]),
                         left: percentValue(properties["device_batteryLevelLeft"]),
                         right: percentValue(properties["device_batteryLevelRight"]),
@@ -750,15 +761,74 @@ final class PeripheralBatteryManager: ObservableObject {
         return Int(digits)
     }
 
-    nonisolated private static func icon(for minorType: String) -> String {
+    /// `device_productID` / `device_vendorID` come out of system_profiler as
+    /// the hex strings "0x2030" / "0x004C".
+    nonisolated private static func hexValue(_ raw: Any?) -> Int? {
+        guard let text = raw as? String else { return nil }
+        let trimmed = text.lowercased().hasPrefix("0x") ? String(text.dropFirst(2)) : text
+        return Int(trimmed, radix: 16)
+    }
+
+    /// 11-16: 机型图标，不再一律用 `headphones`。
+    ///
+    /// 用户原话「不同耳机要不同图标，就苹果的」。蓝牙 Product ID 是唯一可靠的
+    /// 判据 —— 设备名可以随便改（他这台叫「AP5」，改名后按名字判断就废了），
+    /// minorType 一律是 `Headphones`。表里的数值取自 The Apple Wiki /
+    /// pods-control 的对应表，落库前逐台核对过。
+    ///
+    /// SF Symbols 没有「第 5 代」这个词条，AirPods 5 用 `airpods.gen4`
+    /// （同为无耳塞短柄造型，是苹果自家画得最接近的一版）。
+    nonisolated private static func icon(
+        for minorType: String,
+        name: String,
+        productID: Int?,
+        vendorID: Int?
+    ) -> String {
         let type = minorType.lowercased()
-        if type.contains("headphone") { return "headphones" }
+        let lowered = name.lowercased()
+
+        if type.contains("headphone") || type.isEmpty {
+            if let symbol = airPodsSymbol(productID) { return symbol }
+            // 名字里带机型的（没被改名的设备）也认一下
+            if lowered.contains("airpods max") { return "airpodsmax" }
+            if lowered.contains("airpods pro") { return "airpodspro" }
+            if lowered.contains("airpods") { return "airpods" }
+            if lowered.contains("beats") { return "beats.headphones" }
+            // 苹果自家的耳机，型号表里没有的新品至少给 AirPods 的造型
+            if vendorID == 0x004C { return "airpods" }
+            return "headphones"
+        }
         if type.contains("keyboard") { return "keyboard" }
         if type.contains("mouse") { return "computermouse" }
         if type.contains("trackpad") { return "trackpad" }
         if type.contains("game") { return "gamecontroller" }
         if type.contains("speaker") { return "hifispeaker" }
         return "dot.radiowaves.left.and.right"
+    }
+
+    /// 蓝牙 Product ID → SF Symbol。AirPods 家族按代际分开，Beats 按系列。
+    nonisolated private static func airPodsSymbol(_ productID: Int?) -> String? {
+        guard let id = productID else { return nil }
+        switch id {
+        // AirPods
+        case 0x2002, 0x200F:            return "airpods"          // 1 代 / 2 代
+        case 0x2013:                    return "airpods.gen3"      // 3 代
+        case 0x2019, 0x201B:            return "airpods.gen4"      // 4 代 / 4 代 ANC
+        case 0x2030, 0x2036:            return "airpods.gen4"      // 5 代（无 gen5 词条）
+        // AirPods Pro
+        case 0x200E, 0x2014, 0x2024,
+             0x2027, 0x202B, 0x202C:    return "airpodspro"        // Pro 1 / 2 / 3
+        // AirPods Max
+        case 0x200A, 0x201F, 0x202D:    return "airpodsmax"       // Max 1 / Max 2
+        // Beats
+        case 0x2003, 0x200B, 0x200D:    return "beats.powerbeats"
+        case 0x2011, 0x2016, 0x2026:    return "beats.studiobuds"
+        case 0x2012:                    return "beats.fitpro"
+        case 0x2006, 0x2009, 0x200C,
+             0x2017, 0x2025:            return "beats.headphones"
+        case 0x2005, 0x2010:            return "beats.earphones"
+        default:                        return nil
+        }
     }
 }
 

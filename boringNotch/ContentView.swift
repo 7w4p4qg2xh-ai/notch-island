@@ -169,30 +169,38 @@ struct ContentView: View {
             && Defaults[.peripheralBatteryEnabled]
     }
 
-    /// 11-16：内建刘海屏上的同一张耳机卡。
+    /// 11-16：内建刘海屏的耳机速览（**贴菜单栏，不往屏幕里伸**）。
     ///
-    /// 以前这条路走的是上游的「一行胶囊」：`[文字][摄像头黑块][图标]` 铺在
-    /// 一块贴屏幕顶边的黑牌里。AirPods 的摘要最长是
-    /// 「AP5 — L 100% · R 100% · Case 66%」，为了塞下它
-    /// `computedChinWidth` 被撑到 640pt —— 于是屏幕正中间横着一条 640 的黑带：
-    /// 文字挤在左端、图标被推到 200pt 外的右端、菜单栏被压住。
-    /// 外接屏那边一直是 408 的卡，所以两屏看起来完全不是一个东西。
+    /// 之前的两版都不对：
+    /// · 640 宽的一行胶囊 —— 摘要文字把 `computedChinWidth` 撑到 640，
+    ///   菜单栏正中横一条黑带，文字挤左端、图标被推到 200pt 外；
+    /// · 浮在刘海下方的 408×66 卡 —— 用户 09:23「这样占用太大了」。
     ///
-    /// 现在内建屏也画这张卡。它不能贴屏幕顶边（那里是硬件摄像头），
-    /// 所以整块牌下沉到刘海下方、四角同半径，浮在菜单栏底下。
-    private var showsNotchConnectionCard: Bool {
+    /// 现在只用刘海两侧那点地方：左「L 95 · R 100」，右「机型图标 + 盒 66%」，
+    /// 中间按摄像头宽度留黑。整块 = 刘海 + 两侧等宽，高度就是菜单栏高度。
+    private var showsNotchPeripheralPeek: Bool {
         !usesFloatingIsland
-            && vm.hasNotch
             && vm.notchState == .closed
-            && !vm.hideOnClosed
             && coordinator.expandingView.show
             && coordinator.expandingView.type == .peripheralBattery
             && Defaults[.peripheralBatteryEnabled]
     }
 
-    /// 卡片离屏幕顶边的距离：硬件刘海高度 + 8pt 透气。
-    private var notchConnectionCardTopGap: CGFloat {
-        showsNotchConnectionCard ? displayClosedNotchHeight + 8 : 0
+    private var notchPeripheralSideWidth: CGFloat { 82 }
+
+    /// 速览条的内容宽度（不含闭态左右内边距 —— 这个状态把它们置 0）。
+    private var notchPeripheralPillWidth: CGFloat {
+        vm.closedNotchSize.width + 8 + 2 * notchPeripheralSideWidth
+    }
+
+    /// 左耳/右耳优先，单值设备退回主电量。
+    private func notchPeripheralLeftText(_ device: PeripheralDeviceBattery?) -> String {
+        guard let device else { return String(localized: "已连接") }
+        var parts: [String] = []
+        if let left = device.left { parts.append("L \(left)") }
+        if let right = device.right { parts.append("R \(right)") }
+        if parts.isEmpty, let main = device.main { parts.append("\(main)%") }
+        return parts.isEmpty ? device.name : parts.joined(separator: " · ")
     }
 
     private var showsMusicCard: Bool {
@@ -328,16 +336,6 @@ struct ContentView: View {
     }
 
     private var currentNotchShape: NotchShape {
-        // 内建屏的耳机卡是「浮在刘海下方的一张卡」，四角同半径。
-        // 贴屏幕顶边就会在菜单栏里留一条黑带（23:34 截图里被骂的就是它）。
-        if showsNotchConnectionCard {
-            return NotchShape(
-                topCornerRadius: islandCardRadius,
-                bottomCornerRadius: islandCardRadius,
-                usesContinuousCorners: true
-            )
-        }
-
         // On a notch-less display there is no cutout to blend into, so the
         // notification grows out of the floating capsule instead: the top
         // corners stay rounded and the whole card keeps a gap from the screen
@@ -571,10 +569,11 @@ struct ContentView: View {
             chinWidth = usesFloatingIsland ? 240 : 640
         } else if coordinator.expandingView.type == .peripheralBattery && coordinator.expandingView.show
             && vm.notchState == .closed && Defaults[.peripheralBatteryEnabled] {
-            // 23:36 → 11-16：两屏现在画的是同一张卡，宽度也统一按卡片宽度走。
-            // 原来内建屏按文字长度撑到 640，就是为了塞下那句摘要 ——
-            // 代价是菜单栏中间横一条黑带。卡片自己会截断/让位，不需要撑宽。
-            chinWidth = islandCardWidth
+            // 两屏分工：外接屏是 408 的卡（用户 11-15 拍板「就这个」），
+            // 内建屏只做贴菜单栏的窄条，不往屏幕里伸。
+            chinWidth = usesFloatingIsland
+                ? islandCardWidth
+                : notchPeripheralPillWidth + 2 * cornerRadiusInsets.closed.bottom
         } else if vm.notchState == .closed, !vm.hideOnClosed, let activity = selectedActivity {
             // Sized for whichever activity is actually on top, not for
             // whichever happens to exist — otherwise swiping to music while a
@@ -823,10 +822,9 @@ struct ContentView: View {
                         .horizontal,
                         vm.notchState == .open
                             ? openedInsets.top
-                            // 内建屏的耳机卡和浮岛卡一样，宽度就是卡片自己的
-                            // 宽度，外面不能再套一层闭态左右内边距，否则
-                            // 408 的卡会被撑成 408 + 2×12。
-                            : ((islandOwnsPlate || showsNotchConnectionCard) ? 0 : cornerRadiusInsets.closed.bottom)
+                            // 内建屏的耳机速览条自己算好了总宽（刘海 + 两侧），
+                            // 外面再套闭态左右内边距会把它撑宽 2×14。
+                            : ((islandOwnsPlate || showsNotchPeripheralPeek) ? 0 : cornerRadiusInsets.closed.bottom)
                     )
                     // Symmetric on the island. It used to pad the bottom only,
                     // which is correct for an edge-anchored plate (the top
@@ -944,11 +942,6 @@ struct ContentView: View {
                              : ((isNotchHeightZero && vm.notchState == .closed) ? 0.01 : 1))
 
                 mainLayout
-                    // 11-16：内建屏耳机卡整块下沉到硬件刘海下方。
-                    // 必须加在 `mainLayout` 外面 —— 牌子的 background 是在
-                    // mainLayout 内部画的，写在里面那 32pt 空白也会被涂黑，
-                    // 又变成菜单栏里的一条黑带。
-                    .padding(.top, notchConnectionCardTopGap)
                     // alignment: .top matters here — without it this frame
                     // defaults to centering, and shrinking the height for a
                     // notification (openNotchHeight < vm.notchSize.height)
@@ -1213,11 +1206,9 @@ struct ContentView: View {
                                 .transition(.opacity)
                         } else if coordinator.expandingView.type == .peripheralBattery && coordinator.expandingView.show
                             && vm.notchState == .closed && Defaults[.peripheralBatteryEnabled] {
-                            // 11-16：内建屏不再画「[文字][摄像头黑块][图标]」那一行，
-                            // 直接复用外接屏那张 408 的卡（图标 42 / 设备名 / 状态 /
-                            // 盒子百分比 / 电量圆环）。卡片宽度、圆角、文字列宽度
-                            // 全部由 `islandConnectionCard` 自己定，这里不再补 frame。
-                            islandConnectionCard
+                            // 内建屏：贴菜单栏的窄速览条（外接屏走上面的
+                            // `showsConnectionCard`，一直是那张 408 的卡）。
+                            notchPeripheralPeek
                                 .transition(.opacity)
                         } else if coordinator.shouldShowSneakPeek(on: vm.screenUUID) && (usesFloatingIsland || Defaults[.inlineOSD]) && (coordinator.sneakPeekState(for: vm.screenUUID).type != .music) && (coordinator.sneakPeekState(for: vm.screenUUID).type != .battery) && vm.notchState == .closed {
                            InlineOSD(
@@ -1736,19 +1727,53 @@ struct ContentView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .frame(width: islandCardWidth, alignment: .leading)
-        // 11-16 几何探针：内建屏这张卡到底落在哪、多大。
-        // `y` 应该 ≥ 刘海高度（32），不再贴在菜单栏里。
+    }
+
+    /// 内建刘海屏的窄速览条：左边左右耳电量，右边机型图标 + 盒子电量。
+    /// 宽度固定 = 刘海 + 2×82，所以它只是「刘海胖了一点点」，不会横穿菜单栏。
+    @ViewBuilder
+    private var notchPeripheralPeek: some View {
+        let device = peripheralBatteryModel.peekDevice
+        HStack(spacing: 0) {
+            Text(notchPeripheralLeftText(device))
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.white)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .padding(.leading, 10)
+                .frame(width: notchPeripheralSideWidth, alignment: .leading)
+
+            // 摄像头正下方必须留黑：文字跑进硬件刘海底下就看不见了。
+            Rectangle()
+                .fill(.black)
+                .frame(width: vm.closedNotchSize.width + 8)
+
+            HStack(spacing: 5) {
+                // 11-16：机型图标（airpods / airpodspro / airpodsmax / beats…），
+                // 不再一律用 headphones。
+                Image(systemName: peripheralBatteryModel.peekIcon)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.white)
+                if let caseLevel = device?.caseLevel {
+                    Text("\(caseLevel)%")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .monospacedDigit()
+                }
+            }
+            .padding(.trailing, 10)
+            .frame(width: notchPeripheralSideWidth, alignment: .trailing)
+        }
+        .frame(height: displayClosedNotchHeight, alignment: .center)
+        // 几何探针：宽度、图标、左右文字一起打，方便核对是否居中/越界。
         .background {
             GeometryReader { proxy in
                 Color.clear
                     .onAppear {
-                        bnDebugLog("conncard island=\(usesFloatingIsland) notch=\(showsNotchConnectionCard)"
-                                   + " gap=\(notchConnectionCardTopGap) chin=\(computedChinWidth)"
-                                   + " frame=\(proxy.frame(in: .global))")
-                    }
-                    .onChange(of: proxy.size) { _, _ in
-                        bnDebugLog("conncard island=\(usesFloatingIsland) notch=\(showsNotchConnectionCard)"
-                                   + " gap=\(notchConnectionCardTopGap) chin=\(computedChinWidth)"
+                        bnDebugLog("perippeek icon=\(peripheralBatteryModel.peekIcon)"
+                                   + " left=\"\(notchPeripheralLeftText(device))\""
+                                   + " pill=\(notchPeripheralPillWidth) chin=\(computedChinWidth)"
                                    + " frame=\(proxy.frame(in: .global))")
                     }
             }
