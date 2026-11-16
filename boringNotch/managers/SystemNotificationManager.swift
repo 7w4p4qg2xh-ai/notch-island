@@ -43,12 +43,36 @@ final class SystemNotificationManager: ObservableObject {
     private var dismissTask: Task<Void, Never>?
     private var notificationObserver: NSObjectProtocol?
     private var isUserPresent = false
-    /// Last time each token was actually shown. Rebuilding the AX observer
-    /// re-scans banners still sitting in Notification Center, so the very
-    /// same payload can arrive again without any new system event
-    /// (docs/04 Q).
+    /// Last time each content fingerprint was actually shown. Rebuilding the
+    /// AX observer re-scans banners still sitting in Notification Center, so
+    /// the very same payload can arrive again without any new system event
+    /// (docs/04 Q). Keyed on CONTENT, not the banner's AX token: the host
+    /// window rebuild rewrites the identifier (`targetBedTimeReminder` →
+    /// something else), which is how one stale alert popped up 12 times on
+    /// 2026-11-16 morning despite this guard. The helper dedups too — this is
+    /// the second line of defence, chiefly for helper restarts.
     private var recentlyShown: [String: Date] = [:]
-    private let recentTokenWindow: TimeInterval = 60
+    private let recentTokenWindow: TimeInterval = 300
+
+    /// One-shot flag: a control on the notification card (✕ / reveal / queue /
+    /// banner action / open-app) was tapped, and that same mouse event must
+    /// NOT also reach the island's outer `.onTapGesture` (ContentView) —
+    /// SwiftUI delivers the event to the deepest view first, but the outer
+    /// gesture still fires afterwards, so "press ✕" reads as "press the
+    /// island" and the whole panel opens (2026-11-16 user report).
+    /// The control's action arms this flag; the outer tap closure consumes
+    /// it. The 0.4s decay is a safety net for when the outer gesture never
+    /// fires (the Button swallowed the event), so a stale flag cannot eat the
+    /// next genuine island tap.
+    var suppressOpenTap = false
+
+    private func armOpenTapSuppression() {
+        suppressOpenTap = true
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(0.4))
+            self?.suppressOpenTap = false
+        }
+    }
 
     private init() {
         notificationObserver = NotificationCenter.default.addObserver(
@@ -109,6 +133,7 @@ final class SystemNotificationManager: ObservableObject {
     }
 
     func showNextQueued() {
+        armOpenTapSuppression()
         guard isUserPresent, let next = queuedNotifications.first else { return }
         if let activeNotification {
             queuedNotifications.append(activeNotification)
@@ -118,6 +143,7 @@ final class SystemNotificationManager: ObservableObject {
     }
 
     func open(_ notification: SystemNotification) async -> Bool {
+        armOpenTapSuppression()
         let workspace = NSWorkspace.shared
 
         for bundleID in candidateBundleIDs(for: notification) {
@@ -149,14 +175,20 @@ final class SystemNotificationManager: ObservableObject {
     private func add(_ payload: [String: String]) {
         guard let token = payload["token"], !token.isEmpty else { return }
         let now = Date()
+        let fingerprint = Self.contentFingerprint(
+            appName: payload["appName"],
+            title: payload["title"],
+            subtitle: payload["subtitle"],
+            body: payload["body"]
+        )
         recentlyShown = recentlyShown.filter {
             now.timeIntervalSince($0.value) < recentTokenWindow
         }
-        if recentlyShown[token] != nil {
+        if recentlyShown[fingerprint] != nil {
             // Same stale banner re-scanned after an observer re-arm. Refresh
             // the timestamp so a banner that never leaves the center cannot
             // resurface every few minutes.
-            recentlyShown[token] = now
+            recentlyShown[fingerprint] = now
             return
         }
         bnDebugLog(
@@ -206,7 +238,12 @@ final class SystemNotificationManager: ObservableObject {
     }
 
     private func show(_ notification: SystemNotification) {
-        recentlyShown[notification.id] = Date()
+        recentlyShown[Self.contentFingerprint(
+            appName: notification.appName,
+            title: notification.title,
+            subtitle: notification.subtitle,
+            body: notification.body
+        )] = Date()
         bnDebugLog("show token=\(notification.id.prefix(6)) app=\(notification.appName ?? "-")")
         dismissTask?.cancel()
         activeNotification = notification
@@ -243,6 +280,7 @@ final class SystemNotificationManager: ObservableObject {
     /// the tap always produces a visible response, whether or not the system
     /// honours the press (on refusal the helper puts the banner back on screen).
     func performAction(_ action: NotificationAction, on notification: SystemNotification) {
+        armOpenTapSuppression()
         let token = notification.id
         dismissActive(token: token)
         Task {
@@ -259,11 +297,42 @@ final class SystemNotificationManager: ObservableObject {
     /// something the notch cannot do — an incoming call to answer, a button
     /// that refused to press. It beats guessing from the text.
     func reveal(_ notification: SystemNotification) {
+        armOpenTapSuppression()
         let token = notification.id
         dismissActive(token: token)
         Task {
             _ = await XPCHelperClient.shared.revealNotification(token: token)
         }
+    }
+
+    /// Clear the notification out of Notification Center — the card's ✕.
+    ///
+    /// Dismissing the card alone only hides the mirror; an alert banner parked
+    /// off-screen would keep sitting in Notification Center forever, and every
+    /// watcher re-arm would mirror it again. Pressing the banner's own
+    /// "全部清除" action removes it at the source, so ✕ means ✕, not "hide
+    /// for 12 seconds". The helper resolves a stale card token through the
+    /// banner's content fingerprint (host-window rebuilds rewrite tokens).
+    func clear(_ notification: SystemNotification) {
+        armOpenTapSuppression()
+        let token = notification.id
+        dismissActive(token: token)
+        Task {
+            let cleared = await XPCHelperClient.shared.clearNotificationBanner(token: token)
+            if !cleared {
+                bnDebugLog("clear token=\(token.prefix(6)) app=\(notification.appName ?? "-") no clear action / banner gone")
+            }
+        }
+    }
+
+    /// Must match the helper's `NotificationWatcher.contentFingerprint` —
+    /// same fields, same separator, same whitespace handling.
+    nonisolated static func contentFingerprint(
+        appName: String?, title: String?, subtitle: String?, body: String?
+    ) -> String {
+        [appName, title, subtitle, body]
+            .map { ($0 ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+            .joined(separator: "\u{1F}")
     }
 
     nonisolated static func decodeActions(_ raw: String?) -> [NotificationAction] {

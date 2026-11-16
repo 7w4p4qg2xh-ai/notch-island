@@ -580,7 +580,7 @@ struct NotificationExpandedView: View {
             .accessibilityLabel("Show this notification on screen")
 
             Button {
-                manager.dismissActive(token: notification.id)
+                manager.clear(notification)
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .semibold))
@@ -589,7 +589,8 @@ struct NotificationExpandedView: View {
                         .background(.white.opacity(0.1), in: Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss notification")
+            .help("清除通知（从通知中心移除）")
+            .accessibilityLabel("Clear notification")
         }
     }
 

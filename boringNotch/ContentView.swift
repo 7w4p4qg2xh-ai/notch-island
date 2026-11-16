@@ -49,6 +49,15 @@ struct ContentView: View {
     @State private var hoverTask: Task<Void, Never>?
     @State private var notificationPeekTask: Task<Void, Never>?
     @State private var isNotificationPeeking = false
+    /// A peek opened this panel on its own and nobody has opened it by hand
+    /// since. `handleHover` drops `isNotificationPeeking` the moment the
+    /// pointer arrives — and the pointer always arrives, because the ✕ sits
+    /// inside the card — so ownership has to survive that hand-over. Without
+    /// it, clearing the card (✕) leaves the peek guard failing and the panel
+    /// standing open on the full layout, which is what reads as "pressing ✕
+    /// expands the island" (2026-11-16 runtime log: `peek id=nil state=open
+    /// hovering=true` right at the clear).
+    @State private var notificationPeekOpenedNotch = false
     @State private var isHovering: Bool = false
     @State private var anyDropDebounceTask: Task<Void, Never>?
 
@@ -996,6 +1005,16 @@ struct ContentView: View {
                         handleHover(hovering)
                     }
                     .onTapGesture {
+                        // A tap on one of the notification card's controls
+                        // (✕ / reveal / banner action / open-app) hits this
+                        // outer gesture too — same mouse event, deeper view
+                        // first. Swallow that round: the control's own effect
+                        // (clear / reveal / open) already ran, and opening the
+                        // panel on top of it reads as "✕ opens the island".
+                        if SystemNotificationManager.shared.suppressOpenTap {
+                            SystemNotificationManager.shared.suppressOpenTap = false
+                            return
+                        }
                         if vm.notchState == .closed && !shouldDisplayNowPlayingFallbackNotice {
                             doOpen()
                         }
@@ -2017,6 +2036,9 @@ struct ContentView: View {
 extension ContentView {
     @discardableResult
     private func doOpen() -> Bool {
+        // Opening by hand takes the panel away from the peek: from here on a
+        // dismissed card must not retract a panel the user asked for.
+        notificationPeekOpenedNotch = false
         var didOpen = false
         withAnimation(animationSpring) {
             didOpen = vm.open()
@@ -2106,6 +2128,9 @@ extension ContentView {
 
         isNotificationPeeking = true
         if vm.notchState == .closed {
+            // Remember that the panel is up *because of* the notification, so
+            // the retraction survives the pointer hand-over in handleHover.
+            notificationPeekOpenedNotch = true
             withAnimation(animationSpring) {
                 _ = vm.open()
             }
@@ -2131,11 +2156,30 @@ extension ContentView {
     private func endNotificationPeek(closeNotch: Bool) {
         notificationPeekTask?.cancel()
         notificationPeekTask = nil
-        guard isNotificationPeeking else { return }
+        // The peek keeps owning the panel after the pointer hands itself over:
+        // handleHover() clears `isNotificationPeeking` as soon as the cursor
+        // arrives, and reaching the card's ✕ means the cursor is always
+        // there. Guarding on `isNotificationPeeking` alone therefore dropped
+        // every retraction that came from a click on the card — the card
+        // vanished, the panel stayed up on the full layout, and that read as
+        // "✕ expands the island" (2026-11-16, `peek id=nil state=open
+        // hovering=true` at the clear). A panel the user opened by hand
+        // clears `notificationPeekOpenedNotch` in doOpen(), so it is never
+        // taken away from them here.
+        let peekOwnedPanel = isNotificationPeeking || notificationPeekOpenedNotch
+        bnDebugLog(
+            "peekEnd close=\(closeNotch) owned=\(peekOwnedPanel)"
+            + " state=\(vm.notchState) hovering=\(isHovering) popover=\(vm.isPopoverActive)"
+        )
+        guard peekOwnedPanel else { return }
         isNotificationPeeking = false
+        notificationPeekOpenedNotch = false
+        // `!isHovering` is deliberately not part of this guard any more: the
+        // pointer rests on the island for the whole life of the card, so
+        // requiring it to leave first meant the panel only retracted after
+        // the mouse was moved away — i.e. never, for a click on ✕.
         guard closeNotch,
               vm.notchState == .open,
-              !isHovering,
               !vm.isPopoverActive,
               !SharingStateManager.shared.preventNotchClose else { return }
         withAnimation(animationSpring) {

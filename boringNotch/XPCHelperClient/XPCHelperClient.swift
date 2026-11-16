@@ -543,6 +543,24 @@ extension XPCHelperClient {
         }
     }
 
+    /// Presses the banner's "全部清除" action so the notification leaves
+    /// Notification Center for good — the notch card's ✕ button. Failure is
+    /// silent by design: the card is already dismissed, and the system banner
+    /// is not revealed on purpose (the user asked for it to go away).
+    nonisolated func clearNotificationBanner(token: String) async -> Bool {
+        let service = await MainActor.run { ensureRemoteService() }
+        do {
+            return try await service.withContinuation { service, continuation in
+                service.clearNotificationBanner(token) { cleared in
+                    continuation.resume(returning: cleared)
+                }
+            }
+        } catch {
+            await MainActor.run { self.lastError = .transport(underlying: error) }
+            return false
+        }
+    }
+
     nonisolated func setNotificationPassthrough(_ enabled: Bool) {
         Task {
             let service = await MainActor.run { ensureRemoteService() }

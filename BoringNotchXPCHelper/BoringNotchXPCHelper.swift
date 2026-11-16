@@ -220,6 +220,14 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         }
     }
 
+    /// Clear the banner out of Notification Center ("全部清除") — the notch
+    /// card's ✕ button.
+    @objc func clearNotificationBanner(_ token: String, with reply: @escaping (Bool) -> Void) {
+        DispatchQueue.main.async {
+            reply(Self.watcher.clearNotificationBanner(token: token))
+        }
+    }
+
     @objc func stopNotificationWatching() {
         DispatchQueue.main.async { Self.watcher.stopWatching() }
     }

@@ -506,7 +506,35 @@ struct NotchSurfaceBackground: View {
                     // it is fully transparent and the approved bright-backdrop
                     // look is untouched.
                     glassSurfaceHighlights
+                        // Low-frequency easing only: the light angle and the
+                        // rim width are the only values that move, and both
+                        // are quantised upstream. No blend mode, no shadow,
+                        // no mask — those render offscreen and black out the
+                        // private glass layer underneath.
+                        .animation(.easeOut(duration: 0.42), value: specularAngleForLayer)
+                        .animation(.easeOut(duration: 0.42), value: specularLineWidth)
+                        .animation(.easeOut(duration: 0.42), value: specularStrength)
                 }
+            }
+            // Size probe: background child, zero visual footprint, no effect
+            // on the surface's own geometry.
+            Color.clear
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear
+                            .onAppear { surfaceSize = proxy.size }
+                            .onChange(of: proxy.size) { _, size in surfaceSize = size }
+                    }
+                )
+                .allowsHitTesting(false)
+        }
+        .onContinuousHover(coordinateSpace: .local) { phase in
+            guard clearGlass, !reduceMotion else { return }
+            switch phase {
+            case .active(let point):
+                setPointerLight(at: point)
+            case .ended:
+                if pointerLightAngle != nil { pointerLightAngle = nil }
             }
         }
         .onAppear {
@@ -755,6 +783,61 @@ struct NotchSurfaceBackground: View {
     /// *through* the card. No `.blendMode`, `.shadow`, `.mask` or
     /// `.clipShape` — each forces an offscreen pass and a backdrop layer has
     /// no window server to sample in one (docs/04 C8 / P5).
+    /// Strength of the directional layer. Same dark-backdrop ramp as
+    /// `rimStrength`, but with a floor: Apple's clear glass keeps a specular
+    /// edge over bright content too, and at `rimStrength == 0` (bright
+    /// backdrop) the plate had no lit edge at all and read as a flat slab.
+    /// The floor is a fraction of the user's own highlight dial, so that dial
+    /// still governs the result.
+    private var specularStrength: Double {
+        // +0.12 while the pointer is on the plate: the specular lobe brightens
+        // as the light "turns towards" the viewer, the same way Apple's
+        // pointer-reactive material does. Still driven by the user's dial.
+        max(rimStrength, highlight * 0.30) + (pointerLightAngle == nil ? 0 : 0.12)
+    }
+
+    /// Light direction in degrees (0 = right, -90 = straight above) while the
+    /// pointer is over the surface. `nil` = nobody is pointing, so the rest
+    /// angle wins. Kept off the private filter path deliberately: this only
+    /// re-parameterises a SwiftUI gradient, it never re-creates a CA layer.
+    @State private var pointerLightAngle: Double?
+    /// Measured size of the surface, used only to turn the pointer position
+    /// into an angle. Reported by a background `GeometryReader`, so it never
+    /// takes part in layout.
+    @State private var surfaceSize: CGSize = .zero
+
+    /// Light direction at rest: straight above while the island is closed, and
+    /// a little to the upper left once it opens. That shift is the light's
+    /// contribution to the open/close morph — it reads as the material
+    /// catching a different part of the room as the plate grows.
+    private var restLightAngle: Double { isOpen ? -74 : -90 }
+
+    /// Angle actually handed to the conic gradient.
+    private var specularAngleForLayer: Double { pointerLightAngle ?? restLightAngle }
+
+    /// The rim thickens a hair while open: Apple's larger plate carries a
+    /// wider specular band than the small capsule.
+    private var specularLineWidth: Double { isOpen ? 1.7 : 1.5 }
+
+    /// Turns the pointer position into a light angle, quantised: only a >6°
+    /// change is published and the 0.42s ease does the smoothing, so a moving
+    /// pointer costs a handful of gradient rebuilds instead of one per event.
+    private func setPointerLight(at point: CGPoint) {
+        guard surfaceSize.width > 40, surfaceSize.height > 8 else { return }
+        let dx = point.x - surfaceSize.width / 2
+        let dy = point.y - surfaceSize.height / 2
+        guard abs(dx) + abs(dy) > 1 else { return }
+        let snapped = (atan2(dy, dx) * 180 / .pi / 6).rounded() * 6
+        if let current = pointerLightAngle, abs(current - snapped) < 5.9 { return }
+        pointerLightAngle = snapped
+        GlassDiagnostics.recordSurface(
+            luma: backdropLuma,
+            strength: darkBackdropStrength,
+            rim: rimStrength,
+            angle: snapped
+        )
+    }
+
     @ViewBuilder
     private var glassSurfaceHighlights: some View {
         ZStack {
@@ -788,6 +871,35 @@ struct NotchSurfaceBackground: View {
                     endPoint: .bottom
                 ),
                 lineWidth: 1
+            )
+
+            // Directional specular — the structure of Apple's
+            // CASDFGlassHighlightEffect: it takes a light angle and returns two
+            // lobes, a strong one on the side whose outline normal faces the
+            // light, plus a weaker counter-lobe on the opposite side (WWDC25
+            // 219: highlights are geometry-driven, not a veil). That private
+            // filter cannot be driven per frame from here, so the same two-lobe
+            // structure is drawn as a conic gradient *along the outline*: only
+            // the rim band is painted, the centre stays at zero pixels — no
+            // fill, no mask, no blend mode.
+            shape.stroke(
+                AngularGradient(
+                    stops: [
+                        // primary lobe, centred on `specularAngle`
+                        .init(color: .white.opacity(0.36 * specularStrength), location: 0.00),
+                        .init(color: .white.opacity(0.13 * specularStrength), location: 0.06),
+                        .init(color: .white.opacity(0.00), location: 0.12),
+                        // counter-lobe: the faint secondary reflection that
+                        // keeps the plate from reading as a one-sided sticker
+                        .init(color: .white.opacity(0.00), location: 0.42),
+                        .init(color: .white.opacity(0.09 * specularStrength), location: 0.50),
+                        .init(color: .white.opacity(0.00), location: 0.58),
+                        .init(color: .white.opacity(0.00), location: 1.00)
+                    ],
+                    center: .center,
+                    angle: .degrees(specularAngleForLayer - 22)
+                ),
+                lineWidth: specularLineWidth
             )
         }
         .allowsHitTesting(false)
@@ -1099,13 +1211,14 @@ enum GlassDiagnostics {
     /// the only read-back for the sibling highlight layers — they are plain
     /// SwiftUI shapes and have no private filter to dump.
     private static var lastSurfaceBucket: Int = -1
-    static func recordSurface(luma: Double?, strength: Double, rim: Double) {
+    static func recordSurface(luma: Double?, strength: Double, rim: Double, angle: Double? = nil) {
         let bucket = Int(strength * 10)
         guard bucket != lastSurfaceBucket else { return }
         lastSurfaceBucket = bucket
         let text = "luma=" + (luma.map { String(format: "%.3f", $0) } ?? "nil")
             + " darkStrength=" + String(format: "%.2f", strength)
             + " edge=" + String(format: "%.2f", rim)
+            + " light=" + (angle.map { String(format: "%.0f", $0) } ?? "rest")
             + " centre=pure-window"
         let path = NSHomeDirectory() + "/bn-glass-surface.log"
         try? (text + "\n").write(

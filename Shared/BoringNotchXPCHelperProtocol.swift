@@ -61,6 +61,7 @@ final class BNLunarBrightnessEvent: NSObject, NSSecureCoding {
     func stopNotificationWatching()
     func setNotificationFilter(_ bundleIDs: [String], allApps: Bool)
     func performNotificationAction(_ token: String, actionTitle: String, with reply: @escaping (Bool) -> Void)
+    func clearNotificationBanner(_ token: String, with reply: @escaping (Bool) -> Void)
     func revealNotification(_ token: String, with reply: @escaping (Bool) -> Void)
     func setNotificationPassthrough(_ enabled: Bool)
 }

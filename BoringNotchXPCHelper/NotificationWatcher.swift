@@ -124,6 +124,33 @@ final class NotificationWatcher {
     private var settleWorkItem: DispatchWorkItem?
     private var observedWindows: [CFHashCode: AXUIElement] = [:]
     private var liveTokens = Set<String>()
+
+    // MARK: Cross-re-arm banner dedup (2026-11-16)
+    //
+    // stop() clears `liveTokens`, and any re-arm (app watchdog, health check,
+    // Notification Center reconnect, host-window recreation) then re-scans
+    // banners that are still sitting in Notification Center — an alert banner
+    // parked off-screen is never dismissed by the user and stays there for
+    // hours. Re-delivering it made the same stale notification pop up every
+    // few minutes (2026-11-16 上午 Bevel「助眠时段」×12). The banner's AX
+    // identifier is no help: `tokenBedTimeReminder`-style identifiers change
+    // when the host window is rebuilt, so the token alone cannot tell
+    // "same banner, re-scanned" from "a new banner".
+    //
+    // Dedup therefore keys on CONTENT (app | title | subtitle | body):
+    // a fingerprint is re-delivered only if it has not been seen for longer
+    // than `fingerprintGracePeriod` — a grace period, not an expiry, so AX
+    // tree jitter during a stack re-layout cannot resurrect the banner, while
+    // a genuinely cleared notification frees its fingerprint well before the
+    // next real occurrence (a daily reminder is 24h away, not 90s).
+    private var fingerprintLastSeen: [String: Date] = [:]
+    private var tokenFingerprints: [String: String] = [:]
+    /// fingerprint → the token its live banner currently answers to, so a
+    /// clear request that arrives with the card's stale token still finds the
+    /// banner after the host window was rebuilt.
+    private var fingerprintTokens: [String: String] = [:]
+    private let fingerprintGracePeriod: TimeInterval = 90
+
     private var allowedBundleIDs = Set<String>()
     private var axDumpCount = 0
     private var mirrorAllApps = false
@@ -289,6 +316,12 @@ final class NotificationWatcher {
         unmirroredWindows.removeAll()
         bannerElements.removeAll()
         bannerWindows.removeAll()
+        // Token-keyed bookkeeping dies with the observer (the AXUIElements are
+        // stale). `fingerprintLastSeen` survives: it IS the cross-re-arm
+        // memory that keeps a parked alert banner from re-delivering on the
+        // very next scan, and the 90s grace period retires it on its own.
+        tokenFingerprints.removeAll()
+        fingerprintTokens.removeAll()
         if restoringWindows {
             restoreAllWindows()
         }
@@ -640,6 +673,9 @@ final class NotificationWatcher {
                         seen.insert(token)
                         // Already mirrored: don't pay for another AX text walk.
                         if liveTokens.contains(token) {
+                            if let fp = tokenFingerprints[token] {
+                                fingerprintLastSeen[fp] = Date()
+                            }
                             allowed.append(token)
                             continue
                         }
@@ -653,10 +689,28 @@ final class NotificationWatcher {
                             needsNative = true
                             break
                         }
+                        // Content dedup: this banner was mirrored before and
+                        // its fingerprint is still inside the grace period
+                        // (it never left the center — the host window was
+                        // merely rebuilt or the watcher re-armed). Register
+                        // it as mirrored WITHOUT delivering it again.
+                        let fingerprint = Self.contentFingerprint(of: notification)
+                        if fingerprintLastSeen[fingerprint] != nil {
+                            trace("silent re-mirror token=\(token)")
+                            allowed.append(token)
+                            liveTokens.insert(token)
+                            tokenFingerprints[token] = fingerprint
+                            fingerprintTokens[fingerprint] = token
+                            fingerprintLastSeen[fingerprint] = Date()
+                            continue
+                        }
                         allowed.append(token)
                         arrivals.append((token, notification))
                         bannerElements[token] = banner
                         bannerWindows[token] = windowKey
+                        tokenFingerprints[token] = fingerprint
+                        fingerprintTokens[fingerprint] = token
+                        fingerprintLastSeen[fingerprint] = Date()
                     }
 
                     if needsNative {
@@ -694,12 +748,25 @@ final class NotificationWatcher {
             liveTokens.formIntersection(seen)
             bannerElements = bannerElements.filter { seen.contains($0.key) }
             bannerWindows = bannerWindows.filter { seen.contains($0.key) }
+            // Fingerprint bookkeeping: token → fingerprint mappings die with
+            // their banner; a fingerprint stays warm for the grace period
+            // after its banner was last seen (AX jitter survives, a cleared
+            // banner frees its slot).
+            let now = Date()
+            tokenFingerprints = tokenFingerprints.filter { seen.contains($0.key) }
+            for (fingerprint, date) in fingerprintLastSeen
+            where now.timeIntervalSince(date) >= fingerprintGracePeriod {
+                fingerprintLastSeen.removeValue(forKey: fingerprint)
+                fingerprintTokens.removeValue(forKey: fingerprint)
+            }
+            let liveFingerprints = Set(tokenFingerprints.values)
+            fingerprintTokens = fingerprintTokens.filter { liveFingerprints.contains($0.value) }
             // Forget windows NotificationCenter destroyed, or the parked list
             // grows for the lifetime of the helper.
             let liveKeys = Set(windows.map { key(for: $0) })
             parkedWindows = parkedWindows.filter { liveKeys.contains($0.key) }
             unmirroredWindows.formIntersection(liveKeys)
-            trace("scan end parked=\(parkedWindows.count) live=\(liveTokens.count)")
+            trace("scan end parked=\(parkedWindows.count) live=\(liveTokens.count) fps=\(fingerprintLastSeen.count)")
         }
     }
 
@@ -764,6 +831,15 @@ final class NotificationWatcher {
         }
 
         return "ax-\(CFHash(banner))"
+    }
+
+    /// Stable identity of a banner across host-window rebuilds: its visible
+    /// text. The AX identifier changes every time Notification Center rebuilds
+    /// the banner host, which is exactly when stale banners get re-scanned.
+    static func contentFingerprint(of notification: CapturedNotification) -> String {
+        [notification.appName, notification.title, notification.subtitle, notification.body]
+            .map { ($0 ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+            .joined(separator: "\u{1F}")
     }
 
     private func key(for window: AXUIElement) -> Int {
@@ -953,6 +1029,51 @@ final class NotificationWatcher {
             return restoreForFailedAction(token)
         }
         return true
+    }
+
+    /// Clears the mirrored banner out of Notification Center — the notch's ✕
+    /// ("全部清除") button. macOS exposes the clear affordance as a custom
+    /// action on the banner itself (measured: `Name:全部清除` on an alert
+    /// stack, `Name:关闭` on plain banners), and `AXUIElementPerformAction`
+    /// works while the window is parked off-screen.
+    ///
+    /// The card may carry a stale token: Notification Center rebuilds its
+    /// banner host whenever it pleases, and after a rebuild the live banner
+    /// answers to a new token while the fingerprint stays the same. Resolve
+    /// through `fingerprintTokens` before giving up.
+    ///
+    /// Unlike `performAction`, failure does NOT reveal the banner: the user
+    /// asked for it to disappear, not to see it again.
+    @discardableResult
+    func clearNotificationBanner(token: String) -> Bool {
+        var banner = bannerElements[token]
+        var resolvedToken = token
+        if banner == nil, let fingerprint = tokenFingerprints[token],
+           let liveToken = fingerprintTokens[fingerprint],
+           let live = bannerElements[liveToken] {
+            banner = live
+            resolvedToken = liveToken
+        }
+        guard let target = banner else {
+            NSLog("[boringNotch] clear for \(token): banner is gone")
+            return false
+        }
+
+        // Stack banners offer 全部清除/Clear All; single banners offer 关闭/Clear.
+        let clearTitles = ["全部清除", "clear all", "清除", "clear", "关闭", "close"]
+        for name in Self.rawActionNames(of: target) {
+            guard let title = Self.displayTitle(forAction: name),
+                  clearTitles.contains(where: {
+                      title.localizedCaseInsensitiveCompare($0) == .orderedSame
+                  })
+            else { continue }
+            let result = AXUIElementPerformAction(target, title as CFString)
+            trace("clear token=\(resolvedToken) via '\(title)' result=\(result.rawValue)")
+            NSLog("[boringNotch] clear '\(title)' on \(resolvedToken) -> \(result.rawValue)")
+            return result == .success
+        }
+        NSLog("[boringNotch] clear for \(resolvedToken): no clear action offered")
+        return false
     }
 
     /// Give the banner's window back so the user can finish the interaction on
