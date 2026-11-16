@@ -301,6 +301,16 @@ enum GlassMetrics {
     static func bleedAmount(height: CGFloat) -> Double {
         min(0.35 * Double(height), 73.5)
     }
+
+    /// How much of the lens is actually visible, 0…1.
+    ///
+    /// Apple leaves `inputRefractionOpacity` at 0 for a plain `NSGlassEffectView`
+    /// and turns it on for the interactive/`clear` presentations; at 0 the layer
+    /// still samples the desktop but the bend is multiplied away, so the panel
+    /// keeps the dimensions of a glass slab with none of the depth cues. 0.55 is
+    /// the point where the rim picks up a readable highlight/shadow pair without
+    /// the centre band picking up a tint, and it is the only value P1 changes.
+    static let refractionOpacity: Double = 0.55
 }
 
 /// The two materials Apple ships. They are not one material with a blur dial:
@@ -477,7 +487,7 @@ struct NotchSurfaceBackground: View {
     @Default(.glassFollowsAppleMetrics) private var followsAppleMetrics
     @Default(.glassAdaptiveScrim) private var adaptiveScrim
     @Default(.glassBackdropSampling) private var backdropSampling
-    /// Luminance of the REAL content behind the island, refreshed ~1.4×/s.
+    /// Luminance of the REAL content behind the island, refreshed ~2.5×/s.
     /// `nil` = sampling off / no Screen Recording permission / capture failed.
     @State private var backdropLuma: Double?
     @State private var didAcquireSampling = false
@@ -540,9 +550,23 @@ struct NotchSurfaceBackground: View {
         .onAppear {
             GlassDefaultsMigration.run()
             GlassDiagnostics.log(tag: "probe", Self.probeSummary)
+            GlassDiagnostics.forceNextSurface()
+            GlassDiagnostics.timeline(
+                "mount",
+                "isOpen=\(isOpen) glassWhileClosed=\(glassWhileClosed)"
+                + " active=\(glassIsActive) clear=\(clearGlass)"
+                + " minScrim=" + String(format: "%.3f", minimumScrim)
+                + " sampling=\(backdropSampling)"
+                + " luma=" + (backdropLuma.map { String(format: "%.3f", $0) } ?? "nil")
+            )
             setSampling(backdropSampling)
         }
         .onDisappear {
+            GlassDiagnostics.timeline(
+                "unmount",
+                "isOpen=\(isOpen) sampling=\(didAcquireSampling)"
+                + " luma=" + (backdropLuma.map { String(format: "%.3f", $0) } ?? "nil")
+            )
             setSampling(false)
         }
         .onChange(of: backdropSampling) { _, enabled in
@@ -550,6 +574,22 @@ struct NotchSurfaceBackground: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .bnBackdropLuminanceChanged)) { note in
             backdropLuma = (note.object as? NSNumber)?.doubleValue
+            // Every field that can make the plate read deeper or shallower, in
+            // the order they are applied. `scrim` is the black wash, `dark` the
+            // dark-backdrop edge treatment, `spec` the specular stroke: the
+            // "deep → shallow" flip is whichever of these three moves first.
+            GlassDiagnostics.timeline(
+                "surface",
+                "luma=" + (backdropLuma.map { String(format: "%.3f", $0) } ?? "nil")
+                + " dark=" + String(format: "%.3f", darkBackdropStrength)
+                + " rim=" + String(format: "%.3f", rimStrength)
+                + " spec=" + String(format: "%.3f", specularStrength)
+                + " scrim=" + String(format: "%.3f", scrimOpacity)
+                + " minScrim=" + String(format: "%.3f", minimumScrim)
+                + " refrOp=" + String(format: "%.3f", GlassDiagnostics.appliedRefractionOpacity)
+                + " glassOpacity=" + String(format: "%.2f", glassOpacity)
+                + " isOpen=\(isOpen) active=\(glassIsActive)"
+            )
             GlassDiagnostics.recordSurface(
                 luma: backdropLuma,
                 strength: darkBackdropStrength,
@@ -565,10 +605,29 @@ struct NotchSurfaceBackground: View {
             didAcquireSampling = true
             BackdropLuminance.acquire()
             // A notification wakes the floating island from a fully hidden
-            // state. Reuse the last real sample instead of waiting ~0.7s for
-            // the next tick: that empty interval used to fall back to the
-            // wallpaper proxy and flash a black scrim (docs/04 P7).
-            if let cached = BackdropLuminance.current { backdropLuma = cached }
+            // state. Reuse the last real sample only while it still describes
+            // the live desktop (one tick ≈ 0.4 s, so 0.9 s is "current or the
+            // one before last"): that avoids the ~0.7 s empty interval which
+            // used to fall back to the wallpaper proxy and flash a black scrim
+            // (docs/04 P7). Anything older is a different scene and must NOT
+            // be applied — that stale reuse is what opened the card deep and
+            // then took ~3 s to un-deepen. `nil` here is the honest answer and
+            // `scrimOpacity` has an explicit branch for it.
+            if let cached = BackdropLuminance.currentIfFresh(within: 0.9) {
+                backdropLuma = cached
+            } else {
+                backdropLuma = nil
+            }
+            // `age` is the number that matters: a cached sample is only useful
+            // if it still describes what is behind the island right now.
+            let age = BackdropLuminance.lastSampleAt.map { Date().timeIntervalSince($0) }
+            GlassDiagnostics.timeline(
+                "seed",
+                "cached=" + (BackdropLuminance.current.map { String(format: "%.3f", $0) } ?? "nil")
+                + " age=" + (age.map { String(format: "%.2f", $0) } ?? "none")
+                + " applied=" + (backdropLuma.map { String(format: "%.3f", $0) } ?? "nil")
+                + " status=\(BackdropLuminance.status)"
+            )
         } else if !enabled, didAcquireSampling {
             didAcquireSampling = false
             backdropLuma = nil
@@ -683,10 +742,18 @@ struct NotchSurfaceBackground: View {
                 }
             }
         } else {
-            // Sampling enabled but no frame yet: a short, light floor keeps
-            // white type readable for the ~0.7s warm-up without turning the
-            // card into a solid black slab.
-            value = max(value, minimumScrim * 0.2)
+            // Sampling enabled but no frame yet, or the last one is stale
+            // enough that `setSampling` refused to apply it. Unknown backdrop
+            // must be treated as the *worst case the gate exists for* — bright
+            // content — because under-dimming bright content is a legibility
+            // failure while over-dimming dark content is merely a wrong look
+            // for one capture (~0.1 s; `start()` samples immediately).
+            //
+            // This used to be `minimumScrim * 0.2` (= 0.07), which was tuned
+            // when the seed always supplied a value and `nil` never happened
+            // in practice. With stale samples now rejected it *does* happen,
+            // and 7% over a real white window made white type unreadable.
+            value = max(value, minimumScrim)
         }
 
         // Apple's "Increase Contrast" makes the material materially more
@@ -973,16 +1040,38 @@ extension Notification.Name {
 /// 35% dimming layer stays on and the plate reads as a flat grey slab.
 ///
 /// With Screen Recording granted, sample the real backdrop (excluding our own
-/// windows) down to 192×108, ~1.4 times a second, and keep ONE number: the
+/// windows) down to 192×108, ~2.5 times a second, and keep ONE number: the
 /// average luminance of the top-centre strip where the island lives. No image
 /// is stored, written to disk, or sent anywhere.
 @MainActor
 enum BackdropLuminance {
     static private(set) var current: Double?
+    /// When the sample behind `current` was taken. `stop()` deliberately keeps
+    /// `current`, so the number alone cannot tell a 40 ms-old reading from a
+    /// 40 s-old one — only this timestamp can.
+    static private(set) var lastSampleAt: Date?
     static private(set) var status: String = "off"
 
     private static var users = 0
     private static var loop: Task<Void, Never>?
+    private static var tickCount = 0
+    private static var lastTickAt: CFTimeInterval?
+
+    /// The last reading, but only if it is young enough to still describe what
+    /// is behind the island *now*.
+    ///
+    /// `stop()` keeps `current` on purpose (the floating island has no window
+    /// while idle, so it must not lose the reading), but the island can be
+    /// rebuilt minutes later over completely different content. Reusing a
+    /// 4-minute-old 0.679 sample made a fresh card open with the bright-backdrop
+    /// treatment — 35% black wash, no dark-backdrop edge, face fill still on,
+    /// i.e. "偏深" — and the EMA needed six 0.7 s ticks to crawl back under
+    /// 0.22, which is the ~3 s "变浅" the user sees.
+    static func currentIfFresh(within seconds: TimeInterval) -> Double? {
+        guard let current, let lastSampleAt else { return nil }
+        guard Date().timeIntervalSince(lastSampleAt) <= seconds else { return nil }
+        return current
+    }
 
     nonisolated static var hasPermission: Bool { CGPreflightScreenCaptureAccess() }
 
@@ -1034,13 +1123,46 @@ enum BackdropLuminance {
             while !Task.isCancelled {
                 let value = await capture()
                 await MainActor.run {
-                    // Exponential smoothing: a one-frame spike at the 0.22
-                    // threshold must not make the material flip between "pure
-                    // window" and "35% black" every 0.7s.
+                    // Exponential smoothing only for drift: a one-frame spike
+                    // at the 0.22 threshold must not make the material flip
+                    // between "pure window" and "35% black" every 0.4 s. A
+                    // scene-sized jump is handled further down by a reset.
                     if let value {
-                        let smoothed = current.map { $0 * 0.65 + value * 0.35 } ?? value
+                        // Two different jobs, two different rules:
+                        // - normal drift (a wallpaper parallax, a window edge
+                        //   moving) → slow EMA, so the material never flickers;
+                        // - a jump > 0.12 → this is a *different scene*, not
+                        //   drift. The old code still crawled there at 35% per
+                        //   tick: from a stale 0.679 down to the 0.22 threshold
+                        //   took six ticks, i.e. the ~3 s of "偏深" after reveal.
+                        //   Reset instead of smoothing; one frame of noise is
+                        //   cheaper than three seconds of the wrong material.
+                        let didReset: Bool
+                        let smoothed: Double
+                        if let last = current, abs(last - value) <= 0.12 {
+                            didReset = false
+                            smoothed = last * 0.65 + value * 0.35
+                        } else {
+                            didReset = true
+                            smoothed = value
+                        }
                         current = smoothed
+                        lastSampleAt = Date()
                         status = String(format: "%.3f", smoothed)
+                        tickCount += 1
+                        let now = CACurrentMediaTime()
+                        let gap = lastTickAt.map { now - $0 } ?? 0
+                        lastTickAt = now
+                        GlassDiagnostics.timeline(
+                            "tick",
+                            "raw=" + String(format: "%.3f", value)
+                            + " ema=" + String(format: "%.3f", smoothed)
+                            + " n=\(tickCount)"
+                            + " dt=" + String(format: "%.3f", gap)
+                            + " reset=\(didReset ? 1 : 0)"
+                            + " iv=0.400"
+                            + " status=\(status)"
+                        )
                         NotificationCenter.default.post(
                             name: .bnBackdropLuminanceChanged,
                             object: NSNumber(value: smoothed)
@@ -1051,7 +1173,11 @@ enum BackdropLuminance {
                         // snap the plate back to the grey fallback.
                     }
                 }
-                try? await Task.sleep(nanoseconds: 700_000_000)
+                // 0.4 s, not 0.7 s. Two reasons: the EMA only has to smooth
+                // drift now (a scene change resets it), and halving the period
+                // halves how long any wrong reading can survive a reveal. The
+                // cost is two 192×108 captures per second instead of 1.4.
+                try? await Task.sleep(nanoseconds: 400_000_000)
             }
         }
     }
@@ -1060,10 +1186,15 @@ enum BackdropLuminance {
         loop?.cancel()
         loop = nil
         // Keep `current`: the floating island disappears entirely while idle,
-        // so the next notification rebuilds this view and needs the last real
-        // reading immediately. Clearing it (and posting nil) made every new
-        // card start with `backdropLuma == nil` → wallpaper proxy → 35% black
-        // scrim for its first frames (docs/04 P7).
+        // so the next notification rebuilds this view and may reuse the last
+        // real reading instead of waiting a full tick. Clearing it (and posting
+        // nil) made every new card start with `backdropLuma == nil` → wallpaper
+        // proxy → 35% black scrim for its first frames (docs/04 P7).
+        //
+        // `lastSampleAt` is what keeps that safe: the value survives, but the
+        // view only applies it while `currentIfFresh(within:)` says the scene
+        // has not changed. Without the timestamp this cache was a trap — a
+        // reading from minutes ago was indistinguishable from a current one.
         status = "off"
         if let last = current {
             NotificationCenter.default.post(
@@ -1074,7 +1205,23 @@ enum BackdropLuminance {
         }
     }
 
+    /// Timing wrapper: the sampler's *cadence* is the bug, so every capture is
+    /// logged with how long it blocked and what it produced. `rect` is the
+    /// constant sample window (30%/80% origin, 40%×20% of the frame), repeated
+    /// here so a log alone proves which pixels the number came from.
     nonisolated private static func capture() async -> Double? {
+        let started = CACurrentMediaTime()
+        let value = await sampleBackdrop()
+        GlassDiagnostics.timeline(
+            "cap",
+            "dur=" + String(format: "%.3f", CACurrentMediaTime() - started)
+            + " rect=0.30/0.80/0.40/0.20"
+            + " result=" + (value.map { String(format: "%.3f", $0) } ?? "nil")
+        )
+        return value
+    }
+
+    nonisolated private static func sampleBackdrop() async -> Double? {
         guard #available(macOS 14.0, *) else { return nil }
         guard CGPreflightScreenCaptureAccess() else { return nil }
         do {
@@ -1207,23 +1354,98 @@ enum GlassDiagnostics {
     }
 
     /// Written only when the adaptive strength crosses a 0.1 bucket, so the
-    /// sampler's ~1.4 updates/s do not turn into ~1.4 disk writes/s. This is
+    /// sampler's ~2.5 updates/s do not turn into as many disk writes. This is
     /// the only read-back for the sibling highlight layers — they are plain
     /// SwiftUI shapes and have no private filter to dump.
     private static var lastSurfaceBucket: Int = -1
+
+    /// The last value handed to `inputRefractionOpacity`, mirrored here so the
+    /// surface read-back (which runs in the SwiftUI layer and cannot reach the
+    /// NSView's parameters) can show it alongside the other strengths.
+    static var appliedRefractionOpacity: Double = 0
+
     static func recordSurface(luma: Double?, strength: Double, rim: Double, angle: Double? = nil) {
-        let bucket = Int(strength * 10)
+        // The refraction opacity is part of the key: the first mount writes a
+        // line before the surface has rebuilt once, and a strength-only bucket
+        // would then swallow every later line, leaving a stale 0.000 on disk.
+        let bucket = Int(strength * 10) * 1000 + Int((appliedRefractionOpacity * 100).rounded())
         guard bucket != lastSurfaceBucket else { return }
         lastSurfaceBucket = bucket
         let text = "luma=" + (luma.map { String(format: "%.3f", $0) } ?? "nil")
             + " darkStrength=" + String(format: "%.2f", strength)
             + " edge=" + String(format: "%.2f", rim)
+            + " refrOp=" + String(format: "%.3f", appliedRefractionOpacity)
             + " light=" + (angle.map { String(format: "%.0f", $0) } ?? "rest")
             + " centre=pure-window"
         let path = NSHomeDirectory() + "/bn-glass-surface.log"
         try? (text + "\n").write(
             to: URL(fileURLWithPath: path), atomically: true, encoding: .utf8
         )
+    }
+
+    /// Lets the next `recordSurface` through the bucket filter. The first frame
+    /// after the island mounts is exactly what the warm-up bug is about, and a
+    /// bucket equal to the previous scene's last bucket used to swallow it.
+    static func forceNextSurface() { lastSurfaceBucket = -1 }
+
+    /// APPEND-ONLY trace of *when* each number reached the material.
+    ///
+    /// Every other log in this type is useless for timing: `applied` and `luma`
+    /// overwrite, and `surface` is deduplicated by 0.1 buckets. A 3-second
+    /// warm-up therefore left no evidence at all — only its last frame
+    /// survived, and the first (wrong) frame was gone. This one never
+    /// overwrites, so the reveal can be replayed tick by tick.
+    ///
+    /// Line format: `<epoch-ms> <media-time> <tag> k=v ...`
+    /// - rotated once per launch to `~/bn-glass-timeline.prev.log`, and again
+    ///   mid-session if the live file passes 2 MB, so a long run cannot grow
+    ///   without bound;
+    /// - per-tag 16 ms throttle: a SwiftUI re-render storm collapses into one
+    ///   line per frame, while the first entry after any quiet gap always gets
+    ///   through (the throttle only ever drops entries that repeat within a
+    ///   single frame).
+    private static let timelineThrottle: CFTimeInterval = 0.016
+    private static var timelineRotated = false
+    private static var timelineStamp: [String: CFTimeInterval] = [:]
+
+    static func timeline(_ tag: String, _ fields: String = "") {
+        let home = NSHomeDirectory()
+        let path = home + "/bn-glass-timeline.log"
+        let prev = home + "/bn-glass-timeline.prev.log"
+        let fm = FileManager.default
+
+        if !timelineRotated {
+            timelineRotated = true
+            if fm.fileExists(atPath: path) {
+                try? fm.removeItem(atPath: prev)
+                try? fm.moveItem(atPath: path, toPath: prev)
+            }
+        }
+
+        let now = CACurrentMediaTime()
+        if let last = timelineStamp[tag], now - last < timelineThrottle { return }
+        timelineStamp[tag] = now
+
+        var line = String(format: "%.3f", Date().timeIntervalSince1970 * 1000)
+            + " " + String(format: "%.4f", now)
+            + " " + tag
+        if !fields.isEmpty { line += " " + fields }
+        line += "\n"
+        guard let data = line.data(using: .utf8) else { return }
+
+        let size = (try? fm.attributesOfItem(atPath: path))?[.size] as? Int ?? 0
+        if size > 2_000_000 {
+            try? fm.removeItem(atPath: prev)
+            try? fm.moveItem(atPath: path, toPath: prev)
+        }
+
+        if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: path)) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
     }
 }
 
@@ -1388,6 +1610,13 @@ final class LiquidGlassSurfaceView: NSView {
         }
 
         p.applyPresence(presence)
+
+        // The lens. Scaled by the same presence dial the face uses, so "glass
+        // presence 0" still means a plain window rather than a window with a
+        // refracting rim. `reveal` is applied at filter-set time, next to
+        // `inputInnerRefractionAmount`, so the bend and its opacity ramp
+        // together instead of the rim popping in at full strength.
+        p.refractionOpacity = GlassMetrics.refractionOpacity * min(max(presence, 0), 1)
         return p
     }
 
@@ -1570,8 +1799,12 @@ final class LiquidGlassSurfaceView: NSView {
         filter.setValue(0.0, forKey: "inputOuterRefractionHeight")
         filter.setValue(-1.0, forKey: "inputRefractionDistance0")
         filter.setValue(0.0, forKey: "inputRefractionDistance1")
-        // 0, not 1: the flat centre must stay a pure window onto the desktop.
-        filter.setValue(p.refractionOpacity, forKey: "inputRefractionOpacity")
+        // Ramps with `reveal` exactly like the bend above, so the lip fades in
+        // over the 0.26 s reveal instead of popping to full depth on frame one.
+        filter.setValue(p.refractionOpacity * ramp, forKey: "inputRefractionOpacity")
+        // Mirrored for the surface read-back; this is the number the filter is
+        // actually running with, not the struct's stored field.
+        GlassDiagnostics.appliedRefractionOpacity = p.refractionOpacity * ramp
 
         // 2. Blur. Clear pins the radius at zero so nothing can reintroduce a
         //    frost; regular uses Apple's own edge blur plus the fill pass that
@@ -1670,6 +1903,27 @@ final class LiquidGlassSurfaceView: NSView {
 
         backdrop.filters = [filter]
         backdrop.setNeedsDisplay()
+
+        // `reveal` and the face/shadow fills are what make the plate read
+        // deep; `backdropLuma` is why they change. Both in one line so the
+        // reveal can be matched against the sampler ticks.
+        GlassDiagnostics.timeline(
+            "rebuild",
+            "variant=\(variant == .clear ? "clear" : "regular")"
+            + " faceBlack=" + String(format: "%.3f", p.faceBlack)
+            + " faceFill=" + String(format: "%.3f", p.faceFillAlpha)
+            + " shadowFill=" + String(format: "%.3f", p.shadowFillAlpha)
+            + " highlight=" + String(format: "%.2f", p.highlight)
+            + " presence=" + String(format: "%.2f", presence)
+            + " reveal=" + String(format: "%.2f", ramp)
+            // The value actually handed to `inputRefractionOpacity` (reveal is
+            // applied on the way in). 0 here means the rim is invisible no
+            // matter what the bend is set to.
+            + " refrOp=" + String(format: "%.3f", p.refractionOpacity * ramp)
+            + " refrAmt=" + String(format: "%.1f", p.innerRefraction * ramp)
+            + " h=" + String(format: "%.0f", bounds.height)
+            + " luma=" + (backdropLuma.map { String(format: "%.3f", $0) } ?? "nil")
+        )
     }
 
     /// Called by the SwiftUI wrapper *after* the new values are in place. It
@@ -1684,6 +1938,10 @@ final class LiquidGlassSurfaceView: NSView {
             "height=\(Int(bounds.height)) variant=\(variant == .clear ? "clear" : "regular")"
             + " appleMetrics=\(followsAppleMetrics)"
             + " refraction=\(p.innerRefraction) lens=\(p.innerRefractionHeight)"
+            // The bend above is worth nothing while `inputRefractionOpacity` is
+            // 0, and both numbers look identical in a screenshot either way, so
+            // the applied opacity has to be in the log to prove P1 is live.
+            + " refractionOpacity=\(p.refractionOpacity)"
             + " shadow=\(p.shadowAmount)/\(p.shadowHeight)/\(p.shadowFillAlpha) highlight=\(p.highlight)"
             + " presence=\(presence) dispersion=\(p.dispersion)"
             + " backdropLuma=\(backdropLuma.map { String(format: "%.3f", $0) } ?? "nil")"
