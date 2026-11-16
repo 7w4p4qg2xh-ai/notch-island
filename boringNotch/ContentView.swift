@@ -203,6 +203,16 @@ struct ContentView: View {
         return parts.isEmpty ? device.name : parts.joined(separator: " · ")
     }
 
+    /// 调试钩子：`touch /tmp/bn-fake-peek` 后重启 app，速览条会用一台假
+    /// AirPods 5 画出来 —— 耳机不在手上也能核对外观，不用等真机连接那 8 秒。
+    /// 文件不存在（正常情况）时两条分支都完全不生效。
+    private static let bnFakePeripheralPeek: Bool =
+        FileManager.default.fileExists(atPath: "/tmp/bn-fake-peek")
+
+    private static let bnFakePeripheralDevice = PeripheralDeviceBattery(
+        name: "AP5", icon: "airpods.gen4", main: nil, left: 95, right: 100, caseLevel: 66
+    )
+
     private var showsMusicCard: Bool {
         guard islandMusicCardEnabled,
               usesFloatingIsland,
@@ -1205,7 +1215,7 @@ struct ContentView: View {
                             islandConnectionCard
                                 .transition(.opacity)
                         } else if coordinator.expandingView.type == .peripheralBattery && coordinator.expandingView.show
-                            && vm.notchState == .closed && Defaults[.peripheralBatteryEnabled] {
+                            && vm.notchState == .closed && Defaults[.peripheralBatteryEnabled] || Self.bnFakePeripheralPeek {
                             // 内建屏：贴菜单栏的窄速览条（外接屏走上面的
                             // `showsConnectionCard`，一直是那张 408 的卡）。
                             notchPeripheralPeek
@@ -1734,6 +1744,7 @@ struct ContentView: View {
     @ViewBuilder
     private var notchPeripheralPeek: some View {
         let device = peripheralBatteryModel.peekDevice
+            ?? (Self.bnFakePeripheralPeek ? Self.bnFakePeripheralDevice : nil)
         HStack(spacing: 0) {
             Text(notchPeripheralLeftText(device))
                 .font(.system(size: 11.5, weight: .medium))
@@ -1752,7 +1763,7 @@ struct ContentView: View {
             HStack(spacing: 5) {
                 // 11-16：机型图标（airpods / airpodspro / airpodsmax / beats…），
                 // 不再一律用 headphones。
-                Image(systemName: peripheralBatteryModel.peekIcon)
+                Image(systemName: device?.icon ?? peripheralBatteryModel.peekIcon)
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(.white)
                 if let caseLevel = device?.caseLevel {
@@ -1771,7 +1782,7 @@ struct ContentView: View {
             GeometryReader { proxy in
                 Color.clear
                     .onAppear {
-                        bnDebugLog("perippeek icon=\(peripheralBatteryModel.peekIcon)"
+                        bnDebugLog("perippeek icon=\(device?.icon ?? peripheralBatteryModel.peekIcon)"
                                    + " left=\"\(notchPeripheralLeftText(device))\""
                                    + " pill=\(notchPeripheralPillWidth) chin=\(computedChinWidth)"
                                    + " frame=\(proxy.frame(in: .global))")
