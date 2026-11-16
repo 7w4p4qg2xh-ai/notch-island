@@ -1777,6 +1777,15 @@ struct ContentView: View {
             .frame(width: notchPeripheralSideWidth, alignment: .trailing)
         }
         .frame(height: displayClosedNotchHeight, alignment: .center)
+        // 自己把底涂黑。外壳那一层 `NotchSurfaceBackground` 在闭态下
+        // 时而黑、时而全透明（同一份代码两次截图分别是「黑牌子」和
+        // 「文字直接浮在壁纸上」），白字在浅色壁纸上就没法看了。
+        // 这里用同一套 `currentNotchShape` 兜住：贴顶、底角圆，稳定可预期。
+        .background {
+            Rectangle()
+                .fill(.black)
+                .clipShape(currentNotchShape)
+        }
         // 几何探针：宽度、图标、左右文字一起打，方便核对是否居中/越界。
         .background {
             GeometryReader { proxy in
