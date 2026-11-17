@@ -302,6 +302,24 @@ enum GlassMetrics {
         min(0.35 * Double(height), 73.5)
     }
 
+    // MARK: The drop shadow's four remaining dials (P2)
+    //
+    // `inputShadowAmount` / `inputShadowHeight` only shape *where* the cast
+    // shadow band sits; the five inputs below are the ones that give it
+    // density, softness and direction. They were pinned to 0.0 in `rebuild()`,
+    // which is why the plate had a shadow geometry and no shadow: the band was
+    // there, fully transparent. Apple's clear glass carries all five live.
+    /// Peak alpha of the cast shadow.
+    static let shadowOpacity: Double = 0.16
+    /// Geometric spread of the shadow band, in points.
+    static let shadowRadius: Double = 18
+    /// Softness of the band's outer falloff, in points.
+    static let shadowBlurRadius: Double = 16
+    /// Vertical travel, in points. Positive = downward (y grows down).
+    static let shadowDistanceOffset: Double = 4
+    /// How much desktop colour bleeds into the shadow, 0…1.
+    static let shadowVibrancyContribution: Double = 0.15
+
     /// How much of the lens is actually visible, 0…1.
     ///
     /// Apple leaves `inputRefractionOpacity` at 0 for a plain `NSGlassEffectView`
@@ -338,6 +356,13 @@ struct GlassParameters {
     var shadowAmount: Double = 0
     var shadowHeight: Double = 0
     var shadowFillAlpha: Double = 0
+    // The cast shadow's density / softness / travel. Zero on the frosted
+    // variant, which swaps the shadow layer for the bleed layer.
+    var shadowOpacity: Double = 0
+    var shadowRadius: Double = 0
+    var shadowBlurRadius: Double = 0
+    var shadowDistanceOffset: Double = 0
+    var shadowVibrancyContribution: Double = 0
 
     var highlight: Double = 0.4
     var highlightSpread: Double = 1.309
@@ -384,6 +409,13 @@ struct GlassParameters {
             // gradient, which reads as grey rather than as an edge. Narrowed.
             shadowHeight = GlassMetrics.shadowHeight(height: h) * 0.7
             shadowFillAlpha = 0.05
+            // Without these five the band above is a shape with nothing in it
+            // — `inputShadowOpacity == 0` multiplies the whole layer away.
+            shadowOpacity = GlassMetrics.shadowOpacity
+            shadowRadius = GlassMetrics.shadowRadius
+            shadowBlurRadius = GlassMetrics.shadowBlurRadius
+            shadowDistanceOffset = GlassMetrics.shadowDistanceOffset
+            shadowVibrancyContribution = GlassMetrics.shadowVibrancyContribution
 
             highlight = 0.4
             highlightSpread = 1.309
@@ -436,6 +468,19 @@ struct GlassParameters {
         // look grey around the edges. Scaling it makes the slider honest —
         // 100% is Apple's clear, 0% is a plain window.
         shadowFillAlpha *= p
+
+        // The cast shadow belongs to the same material, so the same dial owns
+        // it: at presence 0 there is no slab, hence nothing to cast one.
+        // Density, travel and vibrancy follow the dial linearly (they are what
+        // "how much glass" means); radius and blur only travel a third of the
+        // way, because a shadow that loses all of its spread degrades into a
+        // hard 1pt outline — a border, not a shadow.
+        let reach = 0.6 + 0.4 * p
+        shadowOpacity *= p
+        shadowDistanceOffset *= p
+        shadowVibrancyContribution *= p
+        shadowRadius *= reach
+        shadowBlurRadius *= reach
     }
 }
 
@@ -690,71 +735,25 @@ struct NotchSurfaceBackground: View {
     /// surface look like two materials stacked, which is exactly what the old
     /// menu-bar veil did.
     ///
-    /// On top of the user's value this enforces Apple's *clear* gate: clear
-    /// glass is only allowed over content it can read, and its documented
-    /// fallback is a ~35% black darkening layer when the content behind is
-    /// bright. The desktop wallpaper is the only backdrop we can measure
-    /// without screen-recording permission, so it is the stand-in — and the
-    /// whole rule can be switched off in settings, because the user has asked
-    /// for maximum transparency more than once.
+    /// Uniform black wash over the plate. 11-17: reduced to the user's own
+    /// transparency dial (+ the system's Increase-Contrast floor). The previous
+    /// automatic luma-driven gate sampled the top-centre 40%×20% strip, which
+    /// includes the menu bar and a window's white title border — a thin white
+    /// edge pushed the average past 0.62 and switched the whole card to 35%
+    /// black. That switch is gone; see the note inside.
     private var scrimOpacity: Double {
-        // Apple HIG, Materials: a clear Liquid Glass component needs a ~35%
-        // dark dimming layer ONLY when the content beneath is bright; when that
-        // content is sufficiently dark, no dimming layer is needed. The old
-        // unconditional `minimumScrim` ignored the backdrop entirely and, on a
-        // black window under the island, pressed the rim highlights down with
-        // the rest of the plate — the "grey slab" reported 11-08 23:17.
-        //
-        // Prefer the real backdrop sample; fall back to the wallpaper proxy
-        // only when sampling is unavailable (docs/04 C13 explains why the
-        // wallpaper alone is not enough).
-        let realLuma = backdropSampling ? backdropLuma : nil
-        let wallpaperLuma = adaptiveScrim ? DesktopLuminance.average(for: screenUUID) : nil
-        // 🔴 While real sampling is enabled but has not produced its first
-        // frame, the wallpaper proxy must NOT take over: on this machine it
-        // reads 0.440 while the actual content behind the island is a dark
-        // window (docs/04 P3), which instantly triggers the 35% black wash —
-        // the "black popup" reported 11-14 at notification onset.
-        let luminance = realLuma ?? (backdropSampling ? nil : wallpaperLuma)
-
+        // 🔴 11-17 用户拍板「直接去掉」自动黑遮罩。
+        // 旧的 luma 驱动逻辑读「顶部中央 40%×20%」这条大采样窗，覆盖菜单栏和
+        // 窗口白色标题栏：一条白边把 CIAreaAverage 均值拉过 0.62 → 触发 0.35
+        // 硬闸，把整块卡片开关式盖黑（用户两张对比图实证：白边在→黑底，
+        // 白边没→正常）。这是误判，不是可读性问题。现在遮罩只认用户透明度
+        // dial；采样亮度仍驱动边缘高光（darkBackdropStrength / rimStrength），
+        // 但不再碰中心遮罩。
         var value = darkness
 
-        if let luminance {
-            if luminance <= 0.22 {
-                // Dark backdrop: no *automatic* dimming layer at all. White type
-                // is already legible and the edge highlights must stay intact.
-                // The user's own darkness dial is never overridden here.
-            } else {
-                // 🔴 Continuous, not a step. The old `max(value, minimumScrim)`
-                // jumped straight to 0.35 black the moment a smoothed sample
-                // crept above 0.22; this machine's dark UI measures 0.166–0.216,
-                // so a single frame over the threshold slapped a black slab
-                // over the card and pressed the specular edge down with it.
-                // Same 0.22→0.32 ramp as `darkBackdropStrength`: at 0.365 (the
-                // normal wallpaper) `warm == 1`, so the approved bright-
-                // backdrop look is unchanged.
-                let warm = min(max((luminance - 0.22) / 0.10, 0), 1)
-                value = max(value, minimumScrim * warm)
-                if luminance > 0.62 {
-                    value = max(value, 0.35)
-                } else if luminance > 0.45 {
-                    value = max(value, 0.18)
-                }
-            }
-        } else {
-            // Sampling enabled but no frame yet, or the last one is stale
-            // enough that `setSampling` refused to apply it. Unknown backdrop
-            // must be treated as the *worst case the gate exists for* — bright
-            // content — because under-dimming bright content is a legibility
-            // failure while over-dimming dark content is merely a wrong look
-            // for one capture (~0.1 s; `start()` samples immediately).
-            //
-            // This used to be `minimumScrim * 0.2` (= 0.07), which was tuned
-            // when the seed always supplied a value and `nil` never happened
-            // in practice. With stale samples now rejected it *does* happen,
-            // and 7% over a real white window made white type unreadable.
-            value = max(value, minimumScrim)
-        }
+        // 11-17：整段 luma 驱动的自适应遮罩已移除。白边误触发见上方说明。
+        // 现在只有用户自己的透明度 dial（darkness）与系统的增加对比度
+        // 能加遮罩；采样值继续只服务边缘高光/折射。
 
         // Apple's "Increase Contrast" makes the material materially more
         // opaque rather than merely recolouring it.
@@ -905,9 +904,52 @@ struct NotchSurfaceBackground: View {
         )
     }
 
+    /// Strength of the hand-drawn inner shadow, 0…1.
+    ///
+    /// `glassBackground` has **no** `inputInnerShadow*` channel — the full
+    /// input list of the filter was checked key by key (60 keys: `inputShadow*`,
+    /// `inputRingShadow*`, `inputSDRShadow*`, `inputFace*`, `inputBleed*`,
+    /// `inputKeyFillHighlight*`, …), and nothing takes an inset shadow. Apple's
+    /// own Liquid Glass builds that cue out of outline-following overlays, so
+    /// it is drawn the same way here rather than enabling a filter channel that
+    /// does not exist.
+    ///
+    /// Scaled by the same presence dial as the face and the cast shadow: at
+    /// presence 0 there is no slab, so there is nothing for the edge to shade.
+    private var innerShadowStrength: Double {
+        guard glassIsActive, clearGlass, !reduceTransparency else { return 0 }
+        return min(max(glassOpacity, 0), 1)
+    }
+
+    /// The inner shadow ring: black only along the outline, decaying inwards.
+    ///
+    /// A single `Shape.stroke` paints its whole band at one alpha, so the
+    /// "0.16 at the outermost 1pt fading to 0 by 6pt" profile is composed from
+    /// three nested strokes whose alphas accumulate where they overlap:
+    /// 10pt (+0.05), 8pt (+0.04), 6pt (+0.07) → ≈0.152 in the first 3pt inside
+    /// the edge, ≈0.088 at 3–4pt, ≈0.05 at 4–5pt, 0 beyond — a straight-ish
+    /// ramp, no fill anywhere near the centre, no `.shadow`, `.blur`,
+    /// `.blendMode` or `.mask` (each would force an offscreen pass that a
+    /// backdrop layer cannot sample in).
+    @ViewBuilder
+    private var innerShadowRing: some View {
+        if innerShadowStrength > 0.001 {
+            ZStack {
+                shape.stroke(Color.black.opacity(0.05 * innerShadowStrength), lineWidth: 10)
+                shape.stroke(Color.black.opacity(0.04 * innerShadowStrength), lineWidth: 8)
+                shape.stroke(Color.black.opacity(0.07 * innerShadowStrength), lineWidth: 6)
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
     @ViewBuilder
     private var glassSurfaceHighlights: some View {
         ZStack {
+            // P2: the missing inner shadow. Sits at the bottom of the stack so
+            // the specular lobe still paints over it — light passes over shade.
+            innerShadowRing
+
             // A 2pt glow that exists ONLY along the top edge. The sides and
             // bottom are fully transparent, so no visible frame can form.
             shape.stroke(
@@ -1857,11 +1899,16 @@ final class LiquidGlassSurfaceView: NSView {
             CGColor(srgbRed: 0, green: 0, blue: 0, alpha: p.shadowFillAlpha),
             forKey: "inputShadowColorMatrixFillColor"
         )
-        filter.setValue(0.0, forKey: "inputShadowOpacity")
-        filter.setValue(0.0, forKey: "inputShadowRadius")
-        filter.setValue(0.0, forKey: "inputShadowBlurRadius")
-        filter.setValue(0.0, forKey: "inputShadowDistanceOffset")
-        filter.setValue(0.0, forKey: "inputShadowVibrancyContribution")
+        // The five dials that decide whether that band is actually visible.
+        // They used to be hard-zero here, which is why the plate had a shadow
+        // *geometry* and no shadow at all. `p.*` already carries the presence
+        // scaling (see `applyPresence`); `ramp` is the open/close reveal, so
+        // the shadow grows in with the plate instead of popping on.
+        filter.setValue(p.shadowOpacity * ramp, forKey: "inputShadowOpacity")
+        filter.setValue(p.shadowRadius, forKey: "inputShadowRadius")
+        filter.setValue(p.shadowBlurRadius, forKey: "inputShadowBlurRadius")
+        filter.setValue(p.shadowDistanceOffset, forKey: "inputShadowDistanceOffset")
+        filter.setValue(p.shadowVibrancyContribution, forKey: "inputShadowVibrancyContribution")
         filter.setValue(1.0, forKey: "inputShadowColorMatrixWhite")
         filter.setValue(0.0, forKey: "inputShadowColorMatrixBlack")
         filter.setValue(1.2, forKey: "inputShadowColorMatrixSaturation")
@@ -1943,6 +1990,15 @@ final class LiquidGlassSurfaceView: NSView {
             // the applied opacity has to be in the log to prove P1 is live.
             + " refractionOpacity=\(p.refractionOpacity)"
             + " shadow=\(p.shadowAmount)/\(p.shadowHeight)/\(p.shadowFillAlpha) highlight=\(p.highlight)"
+            // P2: the five dials that decide whether the band above is visible
+            // at all. All five were 0.0 before this commit, and identical
+            // screenshots look identical whether they are 0 or 0.16 — only the
+            // log can prove the shadow is live.
+            + " shadowOp=\(String(format: "%.4f", p.shadowOpacity))"
+            + " shadowR=\(String(format: "%.2f", p.shadowRadius))"
+            + " shadowBlur=\(String(format: "%.2f", p.shadowBlurRadius))"
+            + " shadowDist=\(String(format: "%.2f", p.shadowDistanceOffset))"
+            + " shadowVib=\(String(format: "%.4f", p.shadowVibrancyContribution))"
             + " presence=\(presence) dispersion=\(p.dispersion)"
             + " backdropLuma=\(backdropLuma.map { String(format: "%.3f", $0) } ?? "nil")"
             + " faceWhite=\(p.faceWhite) faceBlack=\(p.faceBlack) faceFill=\(p.faceFillAlpha)"

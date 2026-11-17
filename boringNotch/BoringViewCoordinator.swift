@@ -443,6 +443,18 @@ final class BoringViewCoordinator: ObservableObject {
         browser: BrowserType = .chromium
     ) {
         Task { @MainActor in
+            // A peripheral peek (headphone connected / battery) arriving while
+            // a mirrored notification owns the panel used to be strangled by
+            // it: the notification's own dismissal — its 12s countdown or the
+            // 2s mouse-leave path — closed the panel and took the peek down
+            // with it (2026-11-17 07:46: the connection peek died 2s in,
+            // leaving only the system's own prompt mid-screen). The peripheral
+            // peek takes over instead: dismiss the notification, the panel
+            // closes, and the peek renders in the closed state for its own
+            // 8s lifetime.
+            if status, type == .peripheralBattery {
+                SystemNotificationManager.shared.dismissActive()
+            }
             withAnimation(.smooth) {
                 self.expandingView.show = status
                 self.expandingView.type = type

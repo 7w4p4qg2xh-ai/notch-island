@@ -667,8 +667,30 @@ final class PeripheralBatteryManager: ObservableObject {
             let snapshot = await Self.fetchSnapshot()
             knownDevices = snapshot
             connectedDevices = snapshot
-            let found = snapshot.first {
+            // 11-17: primary signal is still a NEW device name (name-diff).
+            var found = snapshot.first {
                 $0.hasBattery && $0.looksLikeHeadphones && !before.contains($0.name)
+            }
+            // 11-17 fallback: CoreAudio fired because audio ROUTED to a
+            // headphone, but the name was already in our baseline (app
+            // relaunched with AP5 connected, or a re-connect / system-bubble
+            // confirm that never removed it from system_profiler). Match the
+            // CURRENT output device name against the snapshot so the card
+            // still greets. `peek(isConnection:true)` dedups within 30s, so
+            // CoreAudio's multiple firings can't re-greet.
+            if found == nil {
+                let outputName = AudioOutputRouteResolver.shared.currentOutputDeviceName()
+                    .lowercased()
+                if !outputName.isEmpty {
+                    found = snapshot.first { device in
+                        guard device.hasBattery, device.looksLikeHeadphones else { return false }
+                        let n = device.name.lowercased()
+                        return outputName.contains(n) || n.contains(outputName)
+                    }
+                    if found != nil {
+                        AirPodsTrace.log("route fallback output=\(outputName) matched=\(found?.name ?? "none")")
+                    }
+                }
             }
             AirPodsTrace.log("attempt \(attempt) count=\(snapshot.count) new=\(found?.name ?? "none")")
             if let found {

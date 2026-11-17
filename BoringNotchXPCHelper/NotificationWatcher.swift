@@ -151,6 +151,51 @@ final class NotificationWatcher {
     private var fingerprintTokens: [String: String] = [:]
     private let fingerprintGracePeriod: TimeInterval = 90
 
+    // MARK: Wake-up burst guard (2026-11-17)
+    //
+    // The 90s grace period above is wall-clock and only stays warm while scan
+    // runs. While the Mac sleeps nothing scans, so on wake the FIRST scan sees
+    // every banner parked before sleep with a 21-hour-old fingerprint — all
+    // expired, all re-delivered in one burst (07:46:38: 8 stale banners in
+    // 0.2s). Detect the gap itself: a first scan after a long silence
+    // registers every banner it finds as delivered WITHOUT delivering it.
+    // A genuine new notification does not arrive within a second of waking,
+    // and anything real is still sitting in Notification Center.
+    private var lastScanAt: Date?
+    /// Must stay well above the keepalive scan interval (45s), or a routine
+    /// heartbeat scan would read as a wake-up and swallow a real notification.
+    private let suspensionGapThreshold: TimeInterval = 120
+
+    // MARK: Keepalive scan
+    //
+    // A parked banner sits in the host window silently: it emits no AX
+    // events, so nothing scans, so its fingerprint's grace period expires on
+    // the wall clock even though the banner never left Notification Center —
+    // and the next re-arm (app relaunch, watchdog, health check) re-delivers
+    // it (2026-11-17 08:00: one stale 登录项 banner right after an app
+    // relaunch). A slow heartbeat scan keeps every parked banner's
+    // fingerprint warm and doubles as a cheap "did the system move a window
+    // back" sweep. The AX walk for already-mirrored banners is a few
+    // attribute reads; 45s is far below the 90s grace period.
+    private var keepaliveTimer: DispatchSourceTimer?
+    private let keepaliveInterval: TimeInterval = 45
+
+    private func startKeepaliveScan() {
+        guard keepaliveTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + keepaliveInterval, repeating: keepaliveInterval)
+        timer.setEventHandler { [weak self] in
+            self?.scheduleScan()
+        }
+        timer.resume()
+        keepaliveTimer = timer
+    }
+
+    private func stopKeepaliveScan() {
+        keepaliveTimer?.cancel()
+        keepaliveTimer = nil
+    }
+
     private var allowedBundleIDs = Set<String>()
     private var axDumpCount = 0
     private var mirrorAllApps = false
@@ -288,6 +333,7 @@ final class NotificationWatcher {
         scan()
         startCenterMonitor()
         startHealthMonitor()
+        startKeepaliveScan()
         return true
     }
 
@@ -322,6 +368,7 @@ final class NotificationWatcher {
         // very next scan, and the 90s grace period retires it on its own.
         tokenFingerprints.removeAll()
         fingerprintTokens.removeAll()
+        stopKeepaliveScan()
         if restoringWindows {
             restoreAllWindows()
         }
@@ -630,6 +677,14 @@ final class NotificationWatcher {
         autoreleasepool {
             guard let appElement else { return }
             refreshObservedWindows()
+            let now = Date()
+            let resumedAfterSuspension = lastScanAt.map {
+                now.timeIntervalSince($0) > suspensionGapThreshold
+            } ?? false
+            lastScanAt = now
+            if resumedAfterSuspension {
+                NSLog("[boringNotch] scan resumed after a long gap — banners this round are registered silently")
+            }
             trace("scan begin")
             var seen = Set<String>()
             let windows = (appElement[kAXWindowsAttribute] as? [AXUIElement]) ?? []
@@ -704,6 +759,19 @@ final class NotificationWatcher {
                             fingerprintLastSeen[fingerprint] = Date()
                             continue
                         }
+                        if resumedAfterSuspension {
+                            // First scan after sleep/suspension: everything
+                            // in the host is a pre-sleep leftover. Register
+                            // it silently so later scans keep it suppressed,
+                            // but do not burst it onto the user.
+                            trace("silent wake-up banner token=\(token)")
+                            allowed.append(token)
+                            liveTokens.insert(token)
+                            tokenFingerprints[token] = fingerprint
+                            fingerprintTokens[fingerprint] = token
+                            fingerprintLastSeen[fingerprint] = now
+                            continue
+                        }
                         allowed.append(token)
                         arrivals.append((token, notification))
                         bannerElements[token] = banner
@@ -751,8 +819,7 @@ final class NotificationWatcher {
             // Fingerprint bookkeeping: token → fingerprint mappings die with
             // their banner; a fingerprint stays warm for the grace period
             // after its banner was last seen (AX jitter survives, a cleared
-            // banner frees its slot).
-            let now = Date()
+            // banner frees its slot). Reuses the scan-start `now`.
             tokenFingerprints = tokenFingerprints.filter { seen.contains($0.key) }
             for (fingerprint, date) in fingerprintLastSeen
             where now.timeIntervalSince(date) >= fingerprintGracePeriod {

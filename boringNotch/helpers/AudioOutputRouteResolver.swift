@@ -42,6 +42,17 @@ final class AudioOutputRouteResolver {
         }
     }
 
+    /// 11-17: current default output device name. Used by the headphone
+    /// connection detector to recognise a route switch to an ALREADY-known
+    /// device (e.g. app relaunched with AP5 in its baseline, then the user
+    /// reconnects / confirms the system bubble — CoreAudio fires but the
+    /// name-diff sees no "new" device, so no card would show).
+    func currentOutputDeviceName() -> String {
+        let id = systemOutputDeviceID()
+        guard id != kAudioObjectUnknown else { return "" }
+        return readStringProperty(deviceID: id, selector: kAudioObjectPropertyName)
+    }
+
     func volumeSymbol(for value: CGFloat) -> String {
         let clampedValue = max(0, min(1, value))
         let routeKind = stateQueue.sync { cachedRouteKind }

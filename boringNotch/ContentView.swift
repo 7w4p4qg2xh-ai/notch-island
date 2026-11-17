@@ -193,6 +193,27 @@ struct ContentView: View {
             && coordinator.expandingView.show
             && coordinator.expandingView.type == .peripheralBattery
             && Defaults[.peripheralBatteryEnabled]
+            // 11-17：连接瞬间内建屏也弹 408 真卡，窄条让位（8s 后自动恢复）。
+            && !showsNotchConnectionCard
+    }
+
+    /// 11-17：内建刘海屏连接耳机瞬间，临时弹一条 220×34 的连接小条（复用
+    /// 浮岛的 `islandConnectionStrip`；原 408 大卡用户嫌太大已弃用）。窗口
+    /// 本来就是固定 640×210 的画板，条作为 ZStack 里的一层独立 overlay 画在
+    /// 32pt 收起板下方，不撑板、不改任何
+    /// `displayClosedNotchHeight` 消费点——非连接时本 gate 恒 false，内建屏
+    /// 外观逐字不变。8s 倒计时由 `expandingView.didSet` 统一管，这里不新增。
+    private var showsNotchConnectionCard: Bool {
+        vm.hasNotch
+            && !usesFloatingIsland
+            && vm.notchState == .closed
+            && !vm.hideOnClosed
+            && (
+                (coordinator.expandingView.show
+                    && coordinator.expandingView.type == .peripheralBattery
+                    && Defaults[.peripheralBatteryEnabled])
+                || Self.bnFakePeripheralPeek  // 不碰真耳机也能验证新卡布局
+            )
     }
 
     private var notchPeripheralSideWidth: CGFloat { 82 }
@@ -276,7 +297,8 @@ struct ContentView: View {
               musicManager.isPlaying,
               Defaults[.enableLyrics],
               notificationManager.activeNotification == nil,
-              !coordinator.shouldShowSneakPeek(on: vm.screenUUID)
+              !coordinator.shouldShowSneakPeek(on: vm.screenUUID),
+              !showsNotchConnectionCard  // 11-17：连接卡 overlay 与歌词带同挂板下方，互斥避免重叠
         else { return false }
         // 没有时间轴、也没有纯文本歌词时不要挂一条空玻璃。视频 App 常被
         // 系统当成 now-playing 源（11-08 实测抖音桌面版），那种情况本来
@@ -347,6 +369,16 @@ struct ContentView: View {
         CGSize(width: islandCardWidth, height: 0)
     }
 
+    /// 11-17：耳机初连接的"一小条"。用户嫌原 408 连接大卡太大，
+    /// 改成紧凑胶囊：宽 220（约为卡宽一半），高由内容 + 对称 padding 撑出。
+    /// 高度给 0 = 内容自撑，和通知/音乐卡同一套机制（docs/04 L8）。
+    private var islandConnectionStripWidth: CGFloat { 220 }
+    /// 条内最高元素是 ~22pt 的迷你电量环 + 上下各 6pt = 34pt，胶囊两端半圆。
+    private var islandConnectionStripHeight: CGFloat { 34 }
+    private var islandConnectionStripSize: CGSize {
+        CGSize(width: islandConnectionStripWidth, height: 0)
+    }
+
     /// 408 − 14 leading − 42 artwork − 10 gap − 14 trailing. Passed in as a
     /// literal width: the enclosing VStack is intrinsic, so `.infinity` would
     /// collapse back to the ideal width (docs/04 L9.1).
@@ -406,7 +438,9 @@ struct ContentView: View {
             // a 33pt radius and read as a long pill, not the 6.2:1 card the
             // user asked for. The small 185×24 capsule stays a Capsule —
             // its radius follows the ACTUAL plate height (docs/04 L2).
-            if showsMusicCard || showsConnectionCard {
+            // 11-17：连接卡改成 220 小条，不再是 408 方卡，走下面的胶囊轮廓。
+            // 音乐卡仍是卡片圆角；连接小条与收起态共用真胶囊，两端半圆。
+            if showsMusicCard {
                 return NotchShape(
                     topCornerRadius: islandCardRadius,
                     bottomCornerRadius: islandCardRadius,
@@ -723,7 +757,8 @@ struct ContentView: View {
     private var floatingIslandSize: CGSize {
         if showsNotificationCard { return islandNotificationSize }
         if showsMusicCard { return islandMusicSize }
-        if showsConnectionCard { return islandMusicSize }
+        // 11-17：连接卡从 408 大卡改成 220 小条，板子跟着条宽走，别留大空板。
+        if showsConnectionCard { return islandConnectionStripSize }
         if vm.notchState == .open { return islandPanelSize }
         return floatingPillSize
     }
@@ -1125,6 +1160,15 @@ struct ContentView: View {
                     .padding(.top, displayClosedNotchHeight + 3)
                     .transition(.opacity)
             }
+
+            // 11-17：内建屏连接耳机瞬间的 408 连接卡。和歌词带一样挂在
+            // ZStack 上、画在收起板下方，不进主板、不撑黑板；卡本身复用
+            // 浮岛那张（圆环 stroke、中心零 fill、无摄像头黑块）。
+            if showsNotchConnectionCard {
+                notchConnectionCardOverlay
+                    .padding(.top, displayClosedNotchHeight + 6)
+                    .transition(.opacity)
+            }
         }
         .padding(.bottom, 8)
         .frame(maxWidth: windowSize.width, maxHeight: windowSize.height, alignment: .top)
@@ -1231,12 +1275,15 @@ struct ContentView: View {
                         }
                         .frame(height: displayClosedNotchHeight, alignment: .center)
                         } else if showsConnectionCard {
-                            islandConnectionCard
+                            // 11-17：连接提示从 408 大卡改成 220 小条。
+                            islandConnectionStrip
                                 .transition(.opacity)
-                        } else if coordinator.expandingView.type == .peripheralBattery && coordinator.expandingView.show
-                            && vm.notchState == .closed && Defaults[.peripheralBatteryEnabled] || Self.bnFakePeripheralPeek {
+                        } else if !showsNotchConnectionCard
+                            && (coordinator.expandingView.type == .peripheralBattery && coordinator.expandingView.show
+                                && vm.notchState == .closed && Defaults[.peripheralBatteryEnabled] || Self.bnFakePeripheralPeek) {
                             // 内建屏：贴菜单栏的窄速览条（外接屏走上面的
-                            // `showsConnectionCard`，一直是那张 408 的卡）。
+                            // `showsConnectionCard`，11-17 起也是 220 小条）。
+                            // 连接小条 overlay 接管时，这里的窄条让位。
                             notchPeripheralPeek
                                 .transition(.opacity)
                         } else if coordinator.shouldShowSneakPeek(on: vm.screenUUID) && (usesFloatingIsland || Defaults[.inlineOSD]) && (coordinator.sneakPeekState(for: vm.screenUUID).type != .music) && (coordinator.sneakPeekState(for: vm.screenUUID).type != .battery) && vm.notchState == .closed {
@@ -1600,6 +1647,41 @@ struct ContentView: View {
         }
     }
 
+    /// 11-17：内建屏连接耳机瞬间的 220×34 连接小条 overlay。玻璃管线、
+    /// scrim 对齐浮岛收起态胶囊；内容复用 `islandConnectionStrip`，所以
+    /// 圆环依旧纯 stroke、中心零 fill、无摄像头黑块（docs/04 P7/Q2/S9）。
+    /// 挂在 body 的 ZStack 上、画在 32pt 收起板下方：窗口是固定 640×210 的
+    /// 画板，34pt 条落在 38~72pt，不会被裁，也不撑黑板。
+    /// 按钮是死路径（BluetoothPromptHider 已停用、presentSystemPrompt 不触发），
+    /// 条只作展示，故 allowsHitTesting(false)，不抢刘海悬停/点击手势。
+    private var notchConnectionCardOverlay: some View {
+        // 11-17：小条用真胶囊两端半圆，跟浮岛收起态同一轮廓；原 408 方卡的
+        // 36pt 连续圆角在 ~34pt 高的条上会被夹成 11pt 的方角，不像一条。
+        let shape = NotchShape(
+            topCornerRadius: islandConnectionStripHeight / 2,
+            bottomCornerRadius: islandConnectionStripHeight / 2,
+            usesCapsuleCorners: true
+        )
+        return ZStack {
+            NotchSurfaceBackground(
+                shape: shape,
+                isOpen: false,
+                screenUUID: vm.screenUUID,
+                minimumScrim: 0.35,
+                glassWhileClosed: true
+            )
+            // 11-17：内建屏也跟着换成 220 小条（原 408 大卡太大）。
+            islandConnectionStrip
+        }
+        .clipShape(shape)
+        .allowsHitTesting(false)
+        .onAppear {
+            bnDebugLog("notchconnstrip appear hasNotch=\(vm.hasNotch)"
+                       + " floating=\(usesFloatingIsland)"
+                       + " width=\(islandConnectionStripWidth)")
+        }
+    }
+
     /// 歌词还在抓取、或这一句刚好是空行时，退回「歌名 · 艺术家」，
     /// 免得玻璃带里空一块或高度抖动。
     private func notchStripText(at elapsed: Double) -> String {
@@ -1663,6 +1745,67 @@ struct ContentView: View {
         .frame(width: 240)
     }
 
+    /// 11-17：耳机初连接的「一小条」—— 用户嫌原 408 连接大卡太大，改成
+    /// 220×34 的紧凑胶囊：机型图标 + 设备名 + 状态文案 + 一个 22pt 的迷你
+    /// 电量环。浮岛和内建屏共用这一条。
+    ///
+    /// 守住浮岛三问（docs/04 S9）：① 无 `Rectangle().fill(.black)` 摄像头遮罩；
+    /// ② 宽度用 `islandConnectionStripWidth`(220)，不写 640/closedNotchSize；
+    /// ③ 高度是内容 + 上下对称 padding，不用 maxHeight:.infinity。
+    /// 环和图标都是 stroke / 文字，中心零 fill，液态玻璃保持纯透（P7/Q2）。
+    /// 系统气泡那套按钮永不触发（systemPromptButtonTitle 恒 nil），条上不画。
+    @ViewBuilder
+    private var islandConnectionStrip: some View {
+        let device = peripheralBatteryModel.peekDevice
+            ?? (Self.bnFakePeripheralPeek ? Self.bnFakePeripheralDevice : nil)
+        let level = device?.overallLevel
+        let fraction = CGFloat(level ?? 0) / 100.0
+        HStack(spacing: 8) {
+            Image(systemName: device?.icon ?? peripheralBatteryModel.peekIcon)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.55), radius: 1)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(device?.name ?? "耳机")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .shadow(color: .black.opacity(0.55), radius: 1)
+                Text(peripheralBatteryModel.islandStatusMessage ?? "已连接")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .shadow(color: .black.opacity(0.55), radius: 1)
+            }
+
+            Spacer(minLength: 0)
+
+            ZStack {
+                Circle()
+                    .stroke(Color.white.opacity(0.28), lineWidth: 2.5)
+                if let level {
+                    Circle()
+                        .trim(from: 0, to: max(0.02, fraction))
+                        .stroke(
+                            level <= 20 ? Color.red : Color.white,
+                            style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                    Text("\(level)")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .monospacedDigit()
+                }
+            }
+            .frame(width: 22, height: 22)
+        }
+        .padding(.horizontal, 12)
+        .frame(width: islandConnectionStripWidth, height: islandConnectionStripHeight)
+    }
+
     /// 408 − 28 insets − 42 icon − 40 ring − 45 case caption − 4 gaps.
     private var islandConnectionTextWidth: CGFloat {
         islandCardWidth - 28 - 42 - 40 - 45 - 12 * 4
@@ -1676,6 +1819,7 @@ struct ContentView: View {
     @ViewBuilder
     private var islandConnectionCard: some View {
         let device = peripheralBatteryModel.peekDevice
+            ?? (Self.bnFakePeripheralPeek ? Self.bnFakePeripheralDevice : nil)
         let level = device?.overallLevel
         let fraction = CGFloat(level ?? 0) / 100.0
         // 13:31: 系统气泡统一进岛后，卡上要显示系统原文 + 它自带的按钮，
