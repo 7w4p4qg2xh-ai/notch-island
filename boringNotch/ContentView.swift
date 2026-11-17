@@ -1161,11 +1161,14 @@ struct ContentView: View {
                     .transition(.opacity)
             }
 
-            // 11-17：内建屏连接耳机瞬间的 408 连接卡。和歌词带一样挂在
-            // ZStack 上、画在收起板下方，不进主板、不撑黑板；卡本身复用
-            // 浮岛那张（圆环 stroke、中心零 fill、无摄像头黑块）。
+            // 11-17：内建屏连接耳机瞬间的连接小条。和歌词带一样挂在 ZStack
+            // 上、画在收起板下方，不进主板、不撑黑板。
+            // 🔴 必须给固定宽 frame：这个 overlay 直接挂在 body 的 ZStack 上，
+            // 会被宽松撑到整个 640pt 窗口宽 → NotchSurfaceBackground 的 fill
+            // shape 铺满 640，中间只一小撮字（11:17 用户截图实测的"大弹窗"）。
             if showsNotchConnectionCard {
                 notchConnectionCardOverlay
+                    .frame(width: islandConnectionStripWidth, height: islandConnectionStripHeight)
                     .padding(.top, displayClosedNotchHeight + 6)
                     .transition(.opacity)
             }
@@ -1675,10 +1678,21 @@ struct ContentView: View {
         }
         .clipShape(shape)
         .allowsHitTesting(false)
+        // 🔴 11:17：真实几何探针——之前日志里打 width=220 是手打常量，骗了自己。
+        // 这里量实际绘制 frame：若仍见 ~640 说明 overlay 又被 ZStack 撑满，
+        // 220 说明固定 frame 生效。GeometryReader 用 Color.clear 不参与布局。
+        .background {
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear {
+                        bnDebugLog("notchconnstrip REALFRAME \(proxy.frame(in: .global))"
+                                   + " want=\(islandConnectionStripWidth)x\(islandConnectionStripHeight)")
+                    }
+            }
+        }
         .onAppear {
             bnDebugLog("notchconnstrip appear hasNotch=\(vm.hasNotch)"
-                       + " floating=\(usesFloatingIsland)"
-                       + " width=\(islandConnectionStripWidth)")
+                       + " floating=\(usesFloatingIsland)")
         }
     }
 
@@ -1746,8 +1760,13 @@ struct ContentView: View {
     }
 
     /// 11-17：耳机初连接的「一小条」—— 用户嫌原 408 连接大卡太大，改成
-    /// 220×34 的紧凑胶囊：机型图标 + 设备名 + 状态文案 + 一个 22pt 的迷你
-    /// 电量环。浮岛和内建屏共用这一条。
+    /// 紧凑胶囊：机型图标 + 「设备名 状态」一行 + 迷你电量环。浮岛和内建屏
+    /// 共用这一条。
+    ///
+    /// 🔴 11:17 用户截图纠正：第一版用固定 220 宽 + Spacer 把环顶到最右，
+    /// "AP5 已连接"几个字散在宽条里，留白一大片、窗口和文字量不匹配。
+    /// 现在去掉 Spacer，图标/文字/环紧挨着居中排，宽度仍锁 220 给玻璃底
+    /// 一个确定 frame（内容自撑会让 fill shape 飘），但视觉重心落在中线。
     ///
     /// 守住浮岛三问（docs/04 S9）：① 无 `Rectangle().fill(.black)` 摄像头遮罩；
     /// ② 宽度用 `islandConnectionStripWidth`(220)，不写 640/closedNotchSize；
@@ -1760,28 +1779,17 @@ struct ContentView: View {
             ?? (Self.bnFakePeripheralPeek ? Self.bnFakePeripheralDevice : nil)
         let level = device?.overallLevel
         let fraction = CGFloat(level ?? 0) / 100.0
-        HStack(spacing: 8) {
+        HStack(spacing: 7) {
             Image(systemName: device?.icon ?? peripheralBatteryModel.peekIcon)
-                .font(.system(size: 16, weight: .medium))
+                .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(.white)
                 .shadow(color: .black.opacity(0.55), radius: 1)
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text(device?.name ?? "耳机")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .shadow(color: .black.opacity(0.55), radius: 1)
-                Text(peripheralBatteryModel.islandStatusMessage ?? "已连接")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.82))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .shadow(color: .black.opacity(0.55), radius: 1)
-            }
-
-            Spacer(minLength: 0)
+            Text("\(device?.name ?? "耳机") \(peripheralBatteryModel.islandStatusMessage ?? "已连接")")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .shadow(color: .black.opacity(0.55), radius: 1)
 
             ZStack {
                 Circle()
