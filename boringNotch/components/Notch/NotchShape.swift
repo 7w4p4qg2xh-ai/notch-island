@@ -283,8 +283,17 @@ enum GlassMetrics {
     }
 
     /// 27.5 at 44pt, 75 at 210pt and above. Only the clear variant uses it.
+    ///
+    /// 🔴 20:19 clamp lowered 75 → 30, user-rejected as-is: Apple's 75 was
+    /// dumped from a panel that sits ON the screen top edge, where the upper
+    /// half of the shadow band is off-screen. Our floating-island cards are
+    /// drawn INSIDE the 640×210 artboard (y≈38+), so the whole ring is
+    /// visible and reads as "一大圈黑色阴影" (user, 20:19). Narrowing the
+    /// spread to 30 keeps a contact shadow under the bottom edge and lets
+    /// the lens carry the depth instead. Do not "restore the measured value"
+    /// without re-checking the geometry of the surface it is applied to.
     static func shadowAmount(height: CGFloat) -> Double {
-        min(0.625 * Double(height), 75)
+        min(0.625 * Double(height), 30)
     }
 
     /// Exactly 0.4 × height at both measured sizes.
@@ -310,9 +319,16 @@ enum GlassMetrics {
     // which is why the plate had a shadow geometry and no shadow: the band was
     // there, fully transparent. Apple's clear glass carries all five live.
     /// Peak alpha of the cast shadow.
-    static let shadowOpacity: Double = 0.16
+    /// 🔴 20:48: 0.16 → 0.10. Third strike on the outline ring: after the
+    /// spread was narrowed (75→30) the band still read as a dark rim on the
+    /// floating cards over a light wallpaper. The lens and the specular lip
+    /// carry the depth; the cast band stays only as a faint contact cue.
+    static let shadowOpacity: Double = 0.10
     /// Geometric spread of the shadow band, in points.
-    static let shadowRadius: Double = 18
+    /// 🔴 20:19: 18 → 12 alongside the shadowAmount clamp 75 → 30 — the wide
+    /// spread plus the full visible ring read as a dark outline on floating
+    /// cards; a narrower band under the bottom edge reads as a cast shadow.
+    static let shadowRadius: Double = 12
     /// Softness of the band's outer falloff, in points.
     static let shadowBlurRadius: Double = 16
     /// Vertical travel, in points. Positive = downward (y grows down).
@@ -520,6 +536,11 @@ struct NotchSurfaceBackground: View {
     /// *plate* stays black so it fuses with the camera housing, while those
     /// two are separate objects with no cutout to blend into.
     var glassWhileClosed: Bool = false
+    /// Content flex: `true` while something is up on this surface (open
+    /// panel, a peeking card). The material then reads thicker — deeper cast
+    /// shadow, hotter specular — and relaxes when the content dismisses
+    /// (WWDC25 219 "Adaptivity": morphing larger simulates a thicker slab).
+    var flexed: Bool = false
 
     @Default(.enableLiquidGlass) private var enableLiquidGlass
     @Default(.liquidGlassClear) private var clearGlass
@@ -714,7 +735,8 @@ struct NotchSurfaceBackground: View {
                     highlight: highlight,
                     presence: glassOpacity,
                     animatesReveal: !reduceMotion,
-                    backdropLuma: backdropSampling ? backdropLuma : nil
+                    backdropLuma: backdropSampling ? backdropLuma : nil,
+                    flexed: flexed
                 )
                 .allowsHitTesting(false)
             } else if #available(macOS 26.0, *) {
@@ -772,11 +794,10 @@ struct NotchSurfaceBackground: View {
             .allowsHitTesting(false)
     }
 
-    /// Only a real backdrop sample can tell us the content behind is black —
-    /// the wallpaper proxy is blind to a black window (docs/04 P3).
-    private var sampledLuma: Double? {
-        backdropSampling ? backdropLuma : nil
-    }
+    // 20:56: `sampledLuma` (the gated sample) is gone with the last two
+    // luma-driven branches. `backdropLuma` still arrives and is written to
+    // `bn-glass-surface.log` so a future round can still prove what was behind
+    // the plate; nothing in the render path reads it any more.
 
     /// 0…1 strength of the dark-backdrop **edge** treatment. The centre is
     /// never touched — see `glassSurfaceHighlights`.
@@ -799,18 +820,29 @@ struct NotchSurfaceBackground: View {
     /// branch zeroes the face layers (docs/04 P5), so these layers are the
     /// only thing that can define the object's silhouette.
     ///
-    /// Continuous rather than a boolean: a hard cut at 0.22 made the card
-    /// flicker whenever the smoothed sample crawled across the threshold.
+    /// 🔴 20:56 用户拍板：**边缘强度不再听背景亮度**，恒为一个常量。
+    ///
+    /// 现象（两张对比图）：面板离窗口很远、正下方空空如也，却整块忽深忽浅。
+    /// 根因是采样窗尺度错了 —— `BackdropLuminance` 取的是屏幕**顶部中央
+    /// 40% 宽 × 20% 高**（本机 ≈768×216pt）的一整条大区域，而浮岛只有
+    /// 408×70pt 左右。多出来的 150pt 高度和两侧各 180pt 宽度把这个 app 自己
+    /// 以外的桌面、壁纸、别的窗口全都算了进去。壁纸一亮一暗，luma 就从
+    /// 0.52 掉到 0.2x，于是边缘高光在 0 与 1 之间整幅摆动 —— 看起来就是
+    /// "面板自己在变深变浅"，跟它底下有什么毫无关系。
+    ///
+    /// 之前 11-17 已经把 luma 驱动的黑遮罩删了，剩下这一条边缘调制是同类
+    /// 残余。弹窗永远贴在屏幕最顶上，背后只有菜单栏和壁纸，这个采样值对观感
+    /// 没有任何增益，只有干扰 —— 所以直接冻结成常量，采样保留但只写日志
+    /// （`bn-glass-surface.log`），不再参与渲染。
+    ///
+    /// 常量取 0.22：接近原来亮背景下的保底观感（无采样时 0.25），避免用户
+    /// 立刻看到"边又亮了"；暗背景下也不再突然长出一圈亮边（11-17 已明确
+    /// 嫌那圈高光"太奇怪"）。要调只改这一处。
+    static let fixedEdgeStrength: Double = 0.22
+
     private var darkBackdropStrength: Double {
         guard glassIsActive, clearGlass, !reduceTransparency else { return 0 }
-        guard let luma = sampledLuma else { return 0 }
-        // This machine's normal wallpaper measures ~0.365, and a rich
-        // wallpaper is exactly where HIG says clear glass belongs. The
-        // treatment must be completely gone by then, so the ramp ends at
-        // 0.32 — NOT at the scrim's 0.45 "bright" gate: that one is about
-        // dimming *bright* content for legibility, a different question.
-        let t = (luma - 0.22) / (0.32 - 0.22)
-        return 1 - min(max(t, 0), 1)
+        return Self.fixedEdgeStrength
     }
 
     /// On a bright / rich backdrop the glass already defines itself by
@@ -823,7 +855,9 @@ struct NotchSurfaceBackground: View {
     /// old fallback, explicitly rejected on 11-14). Only the *wash* needs a
     /// real measurement; a specular edge is safe to draw unconditionally.
     private var rimStrength: Double {
-        sampledLuma == nil ? 0.25 : darkBackdropStrength
+        // 20:56: no longer branches on `sampledLuma` either — a sample existing
+        // or not must not change the look. One constant for every backdrop.
+        darkBackdropStrength
     }
 
     /// The centre of a Liquid Glass element is a **pure window**. What makes
@@ -921,6 +955,15 @@ struct NotchSurfaceBackground: View {
         return min(max(glassOpacity, 0), 1)
     }
 
+    /// 🔴 20:48 user kill switch: the inner shadow ring IS the "一大圈黑色阴影".
+    /// Three nested black strokes hugging the outline (~0.15 combined alpha,
+    /// 6–10pt band) read on the floating cards as a dark rim around the whole
+    /// card — the user has now rejected it three rounds in a row with a
+    /// screenshot ("你他妈自己看"). 0 = ring off. The glass keeps its depth
+    /// from the lens bend and the specular lip; if a hint of edge shading is
+    /// ever wanted back, raise this in small steps (0.3 ≈ 0.05 at the edge).
+    static let innerShadowScale: Double = 0
+
     /// The inner shadow ring: black only along the outline, decaying inwards.
     ///
     /// A single `Shape.stroke` paints its whole band at one alpha, so the
@@ -933,11 +976,11 @@ struct NotchSurfaceBackground: View {
     /// backdrop layer cannot sample in).
     @ViewBuilder
     private var innerShadowRing: some View {
-        if innerShadowStrength > 0.001 {
+        if innerShadowStrength > 0.001, Self.innerShadowScale > 0.001 {
             ZStack {
-                shape.stroke(Color.black.opacity(0.05 * innerShadowStrength), lineWidth: 10)
-                shape.stroke(Color.black.opacity(0.04 * innerShadowStrength), lineWidth: 8)
-                shape.stroke(Color.black.opacity(0.07 * innerShadowStrength), lineWidth: 6)
+                shape.stroke(Color.black.opacity(0.05 * innerShadowStrength * Self.innerShadowScale), lineWidth: 10)
+                shape.stroke(Color.black.opacity(0.04 * innerShadowStrength * Self.innerShadowScale), lineWidth: 8)
+                shape.stroke(Color.black.opacity(0.07 * innerShadowStrength * Self.innerShadowScale), lineWidth: 6)
             }
             .allowsHitTesting(false)
         }
@@ -1257,7 +1300,7 @@ enum BackdropLuminance {
         GlassDiagnostics.timeline(
             "cap",
             "dur=" + String(format: "%.3f", CACurrentMediaTime() - started)
-            + " rect=0.30/0.80/0.40/0.20"
+            + " rect=band520x104-top"
             + " result=" + (value.map { String(format: "%.3f", $0) } ?? "nil")
         )
         return value
@@ -1293,9 +1336,18 @@ enum BackdropLuminance {
             let image = CIImage(cvPixelBuffer: pixels)
             let w = image.extent.width, h = image.extent.height
             // CIImage's origin is bottom-left; the island sits in the TOP
-            // centre. 40% × 20% covers the 408–640pt plate on both displays.
-            let region = CGRect(x: w * 0.30, y: h * 0.80,
-                                width: w * 0.40, height: h * 0.20)
+            // centre. 20:56 — the window used to be 40% × 20% of the display
+            // (≈768 × 216pt here), more than twice the 408 × 70pt plate, so it
+            // averaged in everything 150pt *below* the island and 180pt to
+            // either side. That is why the plate changed shade while nothing
+            // sat under it. Now: a 520 × 104pt band hugging the top edge,
+            // centred — just the strip of screen the glass actually covers.
+            let screen = CGDisplayBounds(CGMainDisplayID())
+            let bandWidthPt = min(520.0, screen.width * 0.40)
+            let bandHeightPt = min(104.0, screen.height * 0.20)
+            let bw = w * (bandWidthPt / max(screen.width, 1))
+            let bh = h * (bandHeightPt / max(screen.height, 1))
+            let region = CGRect(x: (w - bw) / 2, y: h - bh, width: bw, height: bh)
             guard let avg = CIFilter(name: "CIAreaAverage", parameters: [
                 kCIInputImageKey: image,
                 kCIInputExtentKey: CIVector(cgRect: region)
@@ -1552,6 +1604,20 @@ final class LiquidGlassSurfaceView: NSView {
     private var reveal: Double = 1
     private var revealStart: CFTimeInterval = 0
     private var revealTimer: Timer?
+
+    /// Apple's material reads thicker while it is flexed to carry content
+    /// (WWDC25 219 "Adaptivity": morphing to a larger size simulates a
+    /// thicker slab with **more pronounced lensing and refraction**).
+    /// 0 = resting (the static size curve), 1 = fully flexed; ramped by
+    /// `flex(to:)` the same way `reveal` is, so the bend change is never a
+    /// step. Flex drives ONLY the lens — a shadow-deepening variant was
+    /// user-rejected on 11-17 ("外面一圈阴影很丑": the shadow band wraps the
+    /// whole outline, so deepening it reads as a dirty ring, not a cast).
+    var flexTarget: Double = 0
+    private var flex: Double = 0
+    private var flexFrom: Double = 0
+    private var flexStart: CFTimeInterval = 0
+    private var flexTimer: Timer?
     private var lastHeight: CGFloat = 0
     private var didRecordApplied = false
 
@@ -1568,6 +1634,7 @@ final class LiquidGlassSurfaceView: NSView {
 
     deinit {
         revealTimer?.invalidate()
+        flexTimer?.invalidate()
     }
 
     override func layout() {
@@ -1626,6 +1693,49 @@ final class LiquidGlassSurfaceView: NSView {
         rebuild()
     }
 
+    // MARK: Content flex
+
+    /// Ramps the morph dial to `target` (0…1) over ~0.28 s, same easing as the
+    /// reveal. While content is up on the glass the lens bends harder —
+    /// Apple's "more pronounced lensing and refraction" — then relaxes back
+    /// to the resting size curve when the content dismisses.
+    func flex(to target: Double) {
+        let clamped = min(max(target, 0), 1)
+        guard clamped != flexTarget else { return }
+        flexFrom = flex
+        flexTarget = clamped
+        flexStart = CACurrentMediaTime()
+        flexTimer?.invalidate()
+
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else {
+                    timer.invalidate()
+                    return
+                }
+                let progress = min(1.0, (CACurrentMediaTime() - self.flexStart) / 0.28)
+                let eased = 1 - pow(1 - progress, 3)
+                self.flex = self.flexFrom + (self.flexTarget - self.flexFrom) * eased
+                self.rebuild()
+                if progress >= 1 {
+                    timer.invalidate()
+                    self.flexTimer = nil
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        flexTimer = timer
+    }
+
+    /// Jumps the dial without a ramp — used at mount time, where a fresh
+    /// material should already match its content instead of animating late.
+    func settleFlex(to target: Double) {
+        flexTimer?.invalidate()
+        flexTimer = nil
+        flexTarget = min(max(target, 0), 1)
+        flex = flexTarget
+    }
+
     // MARK: Parameters
 
     private var parameters: GlassParameters {
@@ -1639,17 +1749,13 @@ final class LiquidGlassSurfaceView: NSView {
         p.highlight = highlight
         p.dispersion = dispersion
 
-        // On a near-black backdrop there is nothing for the lens to bend, so
-        // Apple's depth cues have to come from the material's own surface.
-        // A lifted black point and a white face veil would instead lay a flat
-        // grey sheet over the black: keep the centre a pure window and let the
-        // specular rim define the object (WWDC25 219, "Adaptivity").
-        if variant == .clear, let luma = backdropLuma, luma <= 0.22 {
-            p.faceBlack = 0
-            p.faceFillAlpha = 0
-            p.shadowFillAlpha = 0
-            p.highlight = min(p.highlight * 1.25, 0.8)
-        }
+        // 🔴 20:56: the `luma <= 0.22` hard branch is gone. It zeroed
+        // faceBlack / faceFill / shadowFill and boosted `highlight` ×1.25 the
+        // instant the sample crossed 0.22 — a binary switch on top of the
+        // now-frozen edge constant, i.e. the last remaining source of
+        // "the panel changes shade for no reason". The clear variant's own
+        // face values (0.1 / 0.05 / 0.05) are already imperceptible, so nothing
+        // is lost by running the same numbers on every backdrop.
 
         p.applyPresence(presence)
 
@@ -1832,7 +1938,13 @@ final class LiquidGlassSurfaceView: NSView {
         // 1. The lens. Negative bends the sampled image inward, which is what
         //    reads as a convex glass lip. Depth and reach come from Apple's
         //    size curve, so a taller panel gets a deeper slab.
-        filter.setValue(p.innerRefraction * ramp, forKey: "inputInnerRefractionAmount")
+        //    Content flex deepens the bend (not the shadow): WWDC25 219
+        //    "Adaptivity" says morphing larger simulates a thicker material
+        //    with **more pronounced lensing and refraction** — the liquid feel
+        //    lives in the lens, not in a darker outline. Amplitudes are kept
+        //    small (+13% bend, +20% opacity) so the rim never reads as a
+        //    drawn border or a dark band; it only bends light harder.
+        filter.setValue(p.innerRefraction * ramp * (1 + 0.13 * flex), forKey: "inputInnerRefractionAmount")
         filter.setValue(p.innerRefractionHeight, forKey: "inputInnerRefractionHeight")
         // Apple's clear glass does *not* flare light back out of the rim; the
         // outer pass stays at zero. The "翻卷" in the tutorial is what Apple
@@ -1843,10 +1955,10 @@ final class LiquidGlassSurfaceView: NSView {
         filter.setValue(0.0, forKey: "inputRefractionDistance1")
         // Ramps with `reveal` exactly like the bend above, so the lip fades in
         // over the 0.26 s reveal instead of popping to full depth on frame one.
-        filter.setValue(p.refractionOpacity * ramp, forKey: "inputRefractionOpacity")
+        filter.setValue(p.refractionOpacity * ramp * (1 + 0.20 * flex), forKey: "inputRefractionOpacity")
         // Mirrored for the surface read-back; this is the number the filter is
         // actually running with, not the struct's stored field.
-        GlassDiagnostics.appliedRefractionOpacity = p.refractionOpacity * ramp
+        GlassDiagnostics.appliedRefractionOpacity = p.refractionOpacity * ramp * (1 + 0.20 * flex)
 
         // 2. Blur. Clear pins the radius at zero so nothing can reintroduce a
         //    frost; regular uses Apple's own edge blur plus the fill pass that
@@ -1893,6 +2005,12 @@ final class LiquidGlassSurfaceView: NSView {
         //    `.shadow` that used to stand in for it cannot work here: it forces
         //    an offscreen pass, and a backdrop layer has no window server to
         //    sample in that pass.
+        // 5. The shadow layer. Apple's clear glass carries a real one (amount
+        //    75, height 0.4 × the element, offset 8pt down) — it is what lifts
+        //    the panel off the desktop. Ours was pinned to zero, and the SwiftUI
+        //    `.shadow` that used to stand in for it cannot work here: it forces
+        //    an offscreen pass, and a backdrop layer has no window server to
+        //    sample in that pass.
         filter.setValue(p.shadowAmount * ramp, forKey: "inputShadowAmount")
         filter.setValue(p.shadowHeight, forKey: "inputShadowHeight")
         filter.setValue(
@@ -1904,6 +2022,10 @@ final class LiquidGlassSurfaceView: NSView {
         // *geometry* and no shadow at all. `p.*` already carries the presence
         // scaling (see `applyPresence`); `ramp` is the open/close reveal, so
         // the shadow grows in with the plate instead of popping on.
+        // 🔴 11-17 目测判定：投影加深（opacity ×1.55、offset +2.5）读作「绕轮廓一圈
+        // 的脏暗带」，用户原话「外面一圈阴影很丑」。投影环带是沿 SDF 轮廓一圈画的，
+        // 加深/加大 offset 会让上缘和侧缘也露出来——不是「下方一坨投影」。永久还原
+        // Apple 静态五件套，flex 不再碰投影。见本文件 flex 的折射映射（液态感正解）。
         filter.setValue(p.shadowOpacity * ramp, forKey: "inputShadowOpacity")
         filter.setValue(p.shadowRadius, forKey: "inputShadowRadius")
         filter.setValue(p.shadowBlurRadius, forKey: "inputShadowBlurRadius")
@@ -1912,7 +2034,10 @@ final class LiquidGlassSurfaceView: NSView {
         filter.setValue(1.0, forKey: "inputShadowColorMatrixWhite")
         filter.setValue(0.0, forKey: "inputShadowColorMatrixBlack")
         filter.setValue(1.2, forKey: "inputShadowColorMatrixSaturation")
-        filter.setValue(NSValue(size: NSSize(width: 0, height: 8)), forKey: "inputShadowOffset")
+        // Shadow offset pushed 8 → 10pt down (20:19): with the narrowed band
+        // the remaining ink should sit mostly UNDER the bottom edge — a cast
+        // shadow from an overhead light — not wrap the outline evenly.
+        filter.setValue(NSValue(size: NSSize(width: 0, height: 10)), forKey: "inputShadowOffset")
 
         // 6. Bleed and ring shadow belong to the frosted variant only.
         filter.setValue(p.bleedAmount, forKey: "inputBleedAmount")
@@ -1963,11 +2088,12 @@ final class LiquidGlassSurfaceView: NSView {
             + " highlight=" + String(format: "%.2f", p.highlight)
             + " presence=" + String(format: "%.2f", presence)
             + " reveal=" + String(format: "%.2f", ramp)
+            + " flex=" + String(format: "%.2f", flex)
             // The value actually handed to `inputRefractionOpacity` (reveal is
             // applied on the way in). 0 here means the rim is invisible no
             // matter what the bend is set to.
-            + " refrOp=" + String(format: "%.3f", p.refractionOpacity * ramp)
-            + " refrAmt=" + String(format: "%.1f", p.innerRefraction * ramp)
+            + " refrOp=" + String(format: "%.3f", p.refractionOpacity * ramp * (1 + 0.20 * flex))
+            + " refrAmt=" + String(format: "%.1f", p.innerRefraction * ramp * (1 + 0.13 * flex))
             + " h=" + String(format: "%.0f", bounds.height)
             + " luma=" + (backdropLuma.map { String(format: "%.3f", $0) } ?? "nil")
         )
@@ -2025,6 +2151,10 @@ struct LiquidGlassRefraction: NSViewRepresentable {
     let presence: Double
     let animatesReveal: Bool
     let backdropLuma: Double?
+    /// Content flex: `true` while something is up on this surface (open
+    /// panel, a peeking card). Defaults to false so existing call sites and
+    /// the memberwise initialiser keep working untouched.
+    var flexed: Bool = false
 
     static var isSupported: Bool { LiquidGlassPipeline.isSupported }
 
@@ -2032,12 +2162,16 @@ struct LiquidGlassRefraction: NSViewRepresentable {
         GlassDiagnostics.log(tag: "make", "makeNSView refraction=\(refraction) lens=\(lensHeight)")
         let view = LiquidGlassSurfaceView(frame: NSRect(x: 0, y: 0, width: 640, height: 195))
         apply(to: view)
+        // A fresh material must already match its content state instead of
+        // animating late; the ramp only runs on later state flips.
+        view.settleFlex(to: flexed ? 1 : 0)
         view.rebuild()
         return view
     }
 
     func updateNSView(_ nsView: LiquidGlassSurfaceView, context: Context) {
         apply(to: nsView)
+        nsView.flex(to: flexed ? 1 : 0)
         nsView.updateGeometry()
         nsView.rebuild()
     }

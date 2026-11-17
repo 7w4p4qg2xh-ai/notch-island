@@ -934,7 +934,15 @@ struct ContentView: View {
                                 // for the whole lifecycle, so the capsule no
                                 // longer turns from black to glass as it grows.
                                 // Hardware-notch plates never take this path.
-                                glassWhileClosed: closedPillUsesGlass
+                                glassWhileClosed: closedPillUsesGlass,
+                                // The material flexes while content is up: an
+                                // open panel or any peeking card reads as a
+                                // thicker slab (deeper cast shadow, hotter
+                                // rim, WWDC25 219 "Adaptivity") and relaxes
+                                // back to the resting curve on dismiss.
+                                flexed: vm.notchState == .open || showsNotificationCard
+                                    || showsMusicCard || showsConnectionCard
+                                    || coordinator.expandingView.show
                             )
                             // Hairline for the black capsule only: on glass the
                             // material draws its own edge, and a drawn stroke
