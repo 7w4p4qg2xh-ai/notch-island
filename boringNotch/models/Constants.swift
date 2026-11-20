@@ -432,7 +432,10 @@ extension Defaults.Keys {
     static let updateChannel = Key<UpdateChannel>("updateChannel", default: UpdateChannel.bundled)
 
     // MARK: Behavior
-    static let minimumHoverDuration = Key<TimeInterval>("minimumHoverDuration", default: 0.3)
+    /// 悬停多久才展开。0.3 太灵敏：鼠标沿屏幕顶端去点菜单栏图标，只要在
+    /// 岛上方略停就会弹出一整块面板挡住菜单栏（审查 P2-3）。0.45 仍然"跟手"，
+    /// 但把"路过"和"想看"区分开了。
+    static let minimumHoverDuration = Key<TimeInterval>("minimumHoverDuration", default: 0.45)
     static let enableOpeningAnimation = Key<Bool>("enableOpeningAnimation", default: true)
     static let animationSpeedMultiplier = Key<Double>("animationSpeedMultiplier", default: 1.0)
     static let enableHaptics = Key<Bool>("enableHaptics", default: true)
@@ -490,17 +493,10 @@ extension Defaults.Keys {
     /// Take refraction and lens depth from Apple's size curve instead of the
     /// two manual sliders. On by default — this is the conforming behaviour.
     static let glassFollowsAppleMetrics = Key<Bool>("glassFollowsAppleMetrics", default: true)
-    /// Enforce Apple's *clear* gate: clear glass over bright content needs a
-    /// ~35% black darkening layer. Off by default because the user has asked
-    /// for maximum transparency; the switch exists to be conforming on demand.
-    static let glassAdaptiveScrim = Key<Bool>("glassAdaptiveScrim", default: true)
-    /// Apple's material continuously reads what is *actually* behind the glass.
-    /// The wallpaper is a poor stand-in: a black window dragged under the island
-    /// leaves `DesktopLuminance` at 0.440 and the clear-glass dimming layer on,
-    /// which paints the whole plate grey. With Screen Recording permission we
-    /// sample the real backdrop instead. On by default; silently degrades to the
-    /// wallpaper proxy when the permission has not been granted.
-    static let glassBackdropSampling = Key<Bool>("glassBackdropSampling", default: true)
+    // 11-18：`glassAdaptiveScrim` 与 `glassBackdropSampling` 已删除。
+    // 前者在 11-17 删掉亮度驱动的黑遮罩后就没有消费者了，后者只控制一个
+    // 只写日志的截屏循环。两个开关都在设置页里显示过完整说明却拨不动任何
+    // 像素，属于"承诺了但没实现"，见 docs/02 的 11-18 条目。
     static let cornerRadiusScaling = Key<Bool>("cornerRadiusScaling", default: true)
 
     static let showNotHumanFace = Key<Bool>("showNotHumanFace", default: false)
@@ -661,11 +657,20 @@ extension Defaults.Keys {
     static let islandCardWidth = Key<Double>("islandCardWidth", default: 408)
     /// 浮岛卡片圆角上限。实际圆角仍被 NotchShape 的 `0.24 · 高度` 钳制，
     /// 所以调大只对足够高的面板生效，矮卡片不会被拉成椭圆角。
-    static let islandCardCornerRadius = Key<Double>("islandCardCornerRadius", default: 36)
+    /// 11-18：36 → 26。Apple 的卡片外圆角在 26 上下；渲染侧另有 20…26 的
+    /// 安全夹取，这里对齐是为了让滑杆的读数与肉眼看到的一致。
+    static let islandCardCornerRadius = Key<Double>("islandCardCornerRadius", default: 26)
     /// 手点开的面板宽度。
-    static let islandPanelWidth = Key<Double>("islandPanelWidth", default: 480)
-    /// 手点开的面板高度。低于 120 会裁掉播放器控件，所以下限卡在 120。
-    static let islandPanelHeight = Key<Double>("islandPanelHeight", default: 150)
+    /// 11-18：480 → 580。用户的原始抱怨是「上下太长、左右太短」（480×150 = 3.2:1），
+    /// 加宽是唯一零裁剪风险的解法——高度一动就要碰封面/进度条/控件行。
+    /// 上限卡在 600：窗口画布只有 640pt，面板两侧各有 12pt 内边距，600 + 24 = 624，
+    /// 再多就会被窗口裁掉（设置页的滑杆上限同步改成 600）。
+    static let islandPanelWidth = Key<Double>("islandPanelWidth", default: 580)
+    /// 手点开的面板高度。
+    /// 11-18：150 → 136。实测内容合计 ≈ 130pt（顶部 12 + 文字块 43.66 + 2 + 进度条 36
+    /// + 2 + 间距 + 控件行 ~22 + 底部 12），150 时上下白放 16pt 才是「上下太长」的来源。
+    /// 低于 130 会真的裁掉控件，所以设置页下限从 120 提到 130。
+    static let islandPanelHeight = Key<Double>("islandPanelHeight", default: 136)
     /// 收起胶囊是否也用液态玻璃（仅浮岛；内建刘海屏始终纯黑，不可调）。
     static let closedPillGlassEnabled = Key<Bool>("closedPillGlassEnabled", default: true)
     /// 播放音乐时是否在浮岛上显示「正在播放」卡。

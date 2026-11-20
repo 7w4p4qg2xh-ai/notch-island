@@ -53,6 +53,10 @@ final class BNLunarBrightnessEvent: NSObject, NSSecureCoding {
     func currentScreenBrightness(with reply: @escaping (NSNumber?) -> Void)
     func setScreenBrightness(_ value: Float, with reply: @escaping (Bool) -> Void)
     func adjustScreenBrightness(by value: Float, with reply: @escaping (NSNumber?) -> Void)
+    /// Adjust brightness on a specific display by a normalized delta (0...1).
+    /// Built-in displays use DisplayServices/IOKit; external displays use DDC (`m1ddc`).
+    /// Returns the resulting normalized brightness, or nil on failure.
+    func adjustBrightness(displayID: NSNumber, delta: Float, with reply: @escaping (NSNumber?) -> Void)
     func isLunarAvailable(with reply: @escaping (Bool) -> Void)
     func startLunarEventStream(with reply: @escaping (Bool) -> Void)
     func stopLunarEventStream()

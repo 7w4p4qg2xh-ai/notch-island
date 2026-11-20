@@ -374,6 +374,21 @@ final class XPCHelperClient: NSObject, ObservableObject {
         }
     }
 
+    /// Adjust a specific display (built-in via IOKit, external via DDC).
+    func adjustBrightness(displayID: CGDirectDisplayID, delta: Float) async -> Float? {
+        do {
+            let service = ensureRemoteService()
+            return try await service.withContinuation { service, continuation in
+                service.adjustBrightness(displayID: NSNumber(value: displayID), delta: delta) { result in
+                    continuation.resume(returning: result?.floatValue)
+                }
+            }
+        } catch {
+            lastError = .transport(underlying: error)
+            return nil
+        }
+    }
+
     // MARK: - Lunar Events
 
     func isLunarAvailable() async -> Bool {

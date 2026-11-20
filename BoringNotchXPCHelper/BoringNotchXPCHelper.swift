@@ -321,18 +321,31 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
     @objc func currentScreenBrightness(with reply: @escaping (NSNumber?) -> Void) {
         let displayID = brightnessDisplayID()
         var b: Float = 0
-        if displayServicesGetBrightness(displayID: displayID, out: &b) {
+        // DisplayServices reports success but answers -1.0 on third-party panels
+        // it cannot read; that value must never reach the OSD (it used to become
+        // the starting point of the HUD number).
+        if displayServicesGetBrightness(displayID: displayID, out: &b), (0...1).contains(b) {
             reply(NSNumber(value: b))
             return
         }
         if let io = ioServiceFor(displayID: displayID) {
             var level: Float = 0
-            if IODisplayGetFloatParameter(io, 0, kIODisplayBrightnessKey as CFString, &level) == kIOReturnSuccess {
-                IOObjectRelease(io)
+            let ok = IODisplayGetFloatParameter(io, 0, kIODisplayBrightnessKey as CFString, &level) == kIOReturnSuccess
+            IOObjectRelease(io)
+            if ok, (0...1).contains(level) {
                 reply(NSNumber(value: level))
                 return
             }
-            IOObjectRelease(io)
+        }
+        // External panel: fall back to DDC so the OSD opens on the real value
+        // (virtual scale — gamma dim below DDC 0 included).
+        if CGDisplayIsBuiltin(displayID) == 0,
+           let uuidRef = CGDisplayCreateUUIDFromDisplayID(displayID) {
+            let uuid = CFUUIDCreateString(nil, uuidRef.takeRetainedValue()) as String
+            if let m1ddc = Self.m1ddcURL, let value = Self.currentVirtual(m1ddc: m1ddc, uuid: uuid) {
+                reply(NSNumber(value: value))
+                return
+            }
         }
         reply(nil)
     }
@@ -361,7 +374,8 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         // 这条分支以前从没真正跑过——亮度键在 macOS 27 上收不到，也就没人踩到。
         // 现在先读当前值、加上增量、再设绝对目标。
         var current: Float = 0
-        if displayServicesGetBrightness(displayID: displayID, out: &current) {
+        // Validate the reading: a -1.0 answer would turn into "set brightness 0".
+        if displayServicesGetBrightness(displayID: displayID, out: &current), (0...1).contains(current) {
             let target = max(0, min(1, current + value))
             // 23:34 实测：macOS 27 上 `DisplayServicesSetBrightnessSmooth` 是
             // 空操作——rc=0 但亮度纹丝不动（0.60、0.35 都试过，读回仍是 1.0），
@@ -391,6 +405,231 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
             IOObjectRelease(io)
         }
         reply(nil)
+    }
+
+    /// Per-display brightness adjustment for the focus-screen F1/F2 path.
+    /// Built-in panel: DisplayServices/IOKit with a 0...1 scale.
+    /// External panel: DDC via `m1ddc` with a 0...100 scale, addressed by CG display UUID.
+    /// This helper is unsandboxed so it can launch the m1ddc binary.
+    @objc func adjustBrightness(displayID: NSNumber, delta: Float, with reply: @escaping (NSNumber?) -> Void) {
+        let targetID = CGDirectDisplayID(displayID.uint32Value)
+        Self.ddcTrace("adjust id=\(targetID) builtin=\(CGDisplayIsBuiltin(targetID)) delta=\(delta)")
+        if CGDisplayIsBuiltin(targetID) != 0 {
+            var current: Float = 0
+            if displayServicesGetBrightness(displayID: targetID, out: &current), current >= 0 {
+                let next = max(0, min(1, current + delta))
+                if displayServicesSetBrightness(displayID: targetID, value: next) {
+                    var readBack: Float = next
+                    if displayServicesGetBrightness(displayID: targetID, out: &readBack) {
+                        reply(NSNumber(value: readBack))
+                    } else {
+                        reply(NSNumber(value: next))
+                    }
+                    return
+                }
+            }
+            if let io = ioServiceFor(displayID: targetID) {
+                var ioCurrent: Float = 0
+                if IODisplayGetFloatParameter(io, 0, kIODisplayBrightnessKey as CFString, &ioCurrent) == kIOReturnSuccess {
+                    let next = max(0, min(1, ioCurrent + delta))
+                    let ok = IODisplaySetFloatParameter(io, 0, kIODisplayBrightnessKey as CFString, next) == kIOReturnSuccess
+                    IOObjectRelease(io)
+                    reply(ok ? NSNumber(value: next) : nil)
+                    return
+                }
+                IOObjectRelease(io)
+            }
+            reply(nil)
+            return
+        }
+
+        // External display: DDC. The virtual value (0...1) is what the OSD and
+        // the app see; its bottom `gammaZone` maps to "DDC 0 + gamma dimming",
+        // so the keyboard can go darker than DDC 0 — matching what MonitorControl
+        // achieves with its software (gamma) dimming on this panel.
+        guard let uuidRef = CGDisplayCreateUUIDFromDisplayID(targetID) else {
+            reply(nil)
+            return
+        }
+        let uuid = CFUUIDCreateString(nil, uuidRef.takeRetainedValue()) as String
+        guard let m1ddc = Self.m1ddcURL else {
+            NSLog("[brightness] m1ddc not found; cannot adjust external display \(uuid)")
+            reply(nil)
+            return
+        }
+        // DDC on this panel is asymmetric: an absolute `set` costs ~76 ms, while
+        // `chg` (read current, then write) costs ~125 ms — and worse, the read
+        // inside `chg` intermittently answers garbage (2809), which m1ddc then
+        // writes straight back, so the panel jumps to 100% ("Writing 2808").
+        // Keep an absolute value cache and always write with `set`.
+        guard let current = Self.currentVirtual(m1ddc: m1ddc, uuid: uuid) else {
+            NSLog("[brightness] could not read DDC luminance for \(uuid)")
+            reply(nil)
+            return
+        }
+        let target = max(0, min(1, current + delta))
+        let ddcTarget = Self.ddcTarget(forVirtual: target)
+        Self.ddcTrace(String(format: "ddc uuid=%@ current=%.3f step=%.3f target=%.3f ddc=%d", uuid, current, delta, target, ddcTarget))
+        guard Self.runM1ddc(m1ddc, args: ["display", uuid, "set", "luminance", String(ddcTarget)]) != nil else {
+            NSLog("[brightness] m1ddc set luminance \(ddcTarget) failed")
+            Self.ddcTrace("ddc set FAILED target=\(ddcTarget)")
+            reply(nil)
+            return
+        }
+        Self.storeVirtual(target, uuid: uuid)
+        // Gamma dim below DDC 0 (see `gammaZone`). Skipped entirely while
+        // neutral so MonitorControl's gamma is never clobbered by a no-op.
+        Self.applyGammaFactor(Self.gammaFactor(forVirtual: target), displayID: targetID, uuid: uuid)
+        reply(NSNumber(value: target))
+    }
+
+    // MARK: - DDC trace
+
+    /// 每次按键的 delta / 基线 / 目标落盘，便于事后取证「数字和实际为什么对不上」。
+    private static func ddcTrace(_ message: String) {
+        let path = "/tmp/bn-ddc.log"
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        guard let data = "\(stamp) \(message)\n".data(using: .utf8) else { return }
+        if let handle = FileHandle(forWritingAtPath: path) {
+            defer { try? handle.close() }
+            handle.seekToEndOfFile()
+            handle.write(data)
+        } else {
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
+    }
+
+    // MARK: - DDC virtual brightness cache + gamma dim
+
+    private static let ddcLock = NSLock()
+    private static var virtualCache: [String: (value: Float, at: Date)] = [:]
+    /// Last gamma factor we wrote per display UUID (nil = never touched gamma).
+    private static var gammaFactorCache: [String: Float] = [:]
+    /// A pressed key sequence hits this cache repeatedly; the TTL only bounds how
+    /// long an out-of-band change (monitor buttons, another DDC app) can hide.
+    ///
+    /// 11-19：原来是 20 秒，等于把手动改过的亮度当成了「当前值」——用户在
+    /// MonitorControl 里拉到 10，这边还按 100 的基线算 +6 写成 100；反过来
+    /// 按键减到底时又是从一个陈旧的高值往下走，实际永远到不了底。表现就是
+    /// 「两边完全独立」。压到 0.9 秒：连续按键仍在同一序列内命中缓存（不卡），
+    /// 松手后下一次按键必定重新读硬件，外部改动立刻同步。
+    private static let ddcCacheTTL: TimeInterval = 0.9
+
+    /// Bottom slice of the virtual range that lives *below* DDC 0: while the
+    /// virtual value is inside this zone the DDC luminance is pinned at 0 and
+    /// darkness comes from scaling the display's gamma transfer down to black.
+    /// DDC 0 on the H27P6S is still visibly bright; MonitorControl reaches its
+    /// darker floor only because `SwBrightness` maps the bottom of its range
+    /// into gamma. Virtual 0 = gamma 0 = screen black.
+    private static let gammaZone: Float = 0.25
+
+    /// Virtual 0...1 → DDC luminance 0...100 (0 while inside the gamma zone).
+    private static func ddcTarget(forVirtual v: Float) -> Int {
+        guard v > gammaZone else { return 0 }
+        return Int((((v - gammaZone) / (1 - gammaZone)) * 100).rounded())
+    }
+
+    /// DDC luminance 0...100 → virtual value, assuming our gamma is neutral.
+    private static func virtualFromDDC(_ ddc: Int) -> Float {
+        gammaZone + (Float(ddc) / 100.0) * (1 - gammaZone)
+    }
+
+    /// Virtual 0...1 → gamma transfer scale (1 = neutral, 0 = black).
+    private static func gammaFactor(forVirtual v: Float) -> Float {
+        guard v < gammaZone else { return 1 }
+        return max(0, v / gammaZone)
+    }
+
+    /// Virtual brightness (0...1) for a DDC display, cached between presses.
+    /// While our own gamma dim is on the screen a DDC read can't reveal the
+    /// virtual value (it always answers 0), so the cache — our last known
+    /// state — is the source of truth and skips the TTL; otherwise an expired
+    /// entry triggers a fresh hardware read so out-of-band changes sync.
+    private static func currentVirtual(m1ddc: URL, uuid: String) -> Float? {
+        ddcLock.lock()
+        let cached = virtualCache[uuid]
+        let dimmed = gammaFactorCache[uuid].map { $0 < 0.999 } ?? false
+        ddcLock.unlock()
+        if let cached, dimmed || Date().timeIntervalSince(cached.at) < ddcCacheTTL {
+            return cached.value
+        }
+        // `get` prints a bare number. Right after a write the bus can answer
+        // garbage (2809), so validate the range and retry once before giving up.
+        for _ in 0..<2 {
+            if let out = runM1ddc(m1ddc, args: ["display", uuid, "get", "luminance"]),
+               let value = Int(out.trimmingCharacters(in: .whitespacesAndNewlines)),
+               (0...100).contains(value) {
+                let v = virtualFromDDC(value)
+                storeVirtual(v, uuid: uuid)
+                return v
+            }
+        }
+        // DDC read glitch: a stale value beats failing the whole adjustment.
+        return cached?.value
+    }
+
+    private static func storeVirtual(_ value: Float, uuid: String) {
+        ddcLock.lock()
+        virtualCache[uuid] = (value, Date())
+        ddcLock.unlock()
+    }
+
+    /// Writes the gamma transfer formula (`min 0, max f, gamma 1` per channel).
+    /// Neutral rewrites are skipped entirely — we must not clobber another
+    /// app's gamma (MonitorControl) with a no-op. Active dim rewrites every
+    /// time so an OS-side gamma reset (sleep/wake, profile change) heals on
+    /// the next key press instead of leaving HUD 0% on a bright screen.
+    private static func applyGammaFactor(_ factor: Float, displayID: CGDirectDisplayID, uuid: String) {
+        ddcLock.lock()
+        let last = gammaFactorCache[uuid]
+        ddcLock.unlock()
+        if let last, abs(last - factor) < 0.005, factor > 0.999 { return }
+        let err = CGSetDisplayTransferByFormula(
+            displayID,
+            0, factor, 1.0,
+            0, factor, 1.0,
+            0, factor, 1.0
+        )
+        Self.ddcTrace(String(format: "gamma uuid=%@ factor=%.3f last=%@ rc=%d", uuid, factor, last.map { String($0) } ?? "nil", err.rawValue))
+        if err == .success {
+            ddcLock.lock()
+            gammaFactorCache[uuid] = factor
+            ddcLock.unlock()
+        }
+    }
+
+    private static let m1ddcURL: URL? = {
+        let candidates = [
+            "/Users/lisiyuan/homebrew/bin/m1ddc",
+            "/opt/homebrew/bin/m1ddc",
+            "/usr/local/bin/m1ddc",
+        ]
+        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        return nil
+    }()
+
+    private static func runM1ddc(_ url: URL, args: [String]) -> String? {
+        let process = Process()
+        process.executableURL = url
+        process.arguments = args
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                NSLog("[brightness] m1ddc \(args.joined(separator: " ")) rc=\(process.terminationStatus)")
+                return nil
+            }
+            return String(data: data, encoding: .utf8)
+        } catch {
+            NSLog("[brightness] m1ddc launch failed: \(error)")
+            return nil
+        }
     }
 
     // MARK: - Lunar Events

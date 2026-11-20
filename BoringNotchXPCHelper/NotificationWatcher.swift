@@ -145,6 +145,12 @@ final class NotificationWatcher {
     // next real occurrence (a daily reminder is 24h away, not 90s).
     private var fingerprintLastSeen: [String: Date] = [:]
     private var tokenFingerprints: [String: String] = [:]
+    /// Windows whose content we could not read as a banner, with the moment we
+    /// first saw them like that. A banner is only handed back after it has
+    /// stayed unreadable for a couple of seconds — the banner host keeps its
+    /// text nodes for a frame or two while a banner is being torn down, and
+    /// restoring the window that early would replay the dismissal on screen.
+    private var unrecognizedSince: [Int: Date] = [:]
     /// fingerprint → the token its live banner currently answers to, so a
     /// clear request that arrives with the card's stale token still finds the
     /// banner after the host window was rebuilt.
@@ -358,16 +364,29 @@ final class NotificationWatcher {
         observerRunLoop = nil
         observerContext = nil
         scanScheduled = false
-        liveTokens.removeAll()
-        unmirroredWindows.removeAll()
-        bannerElements.removeAll()
-        bannerWindows.removeAll()
-        // Token-keyed bookkeeping dies with the observer (the AXUIElements are
-        // stale). `fingerprintLastSeen` survives: it IS the cross-re-arm
-        // memory that keeps a parked alert banner from re-delivering on the
-        // very next scan, and the 90s grace period retires it on its own.
-        tokenFingerprints.removeAll()
-        fingerprintTokens.removeAll()
+        if restoringWindows {
+            // The session is really over: every window goes back on screen, so
+            // the mirrored-banner bookkeeping would describe windows nobody is
+            // watching any more.
+            liveTokens.removeAll()
+            unmirroredWindows.removeAll()
+            bannerElements.removeAll()
+            bannerWindows.removeAll()
+            tokenFingerprints.removeAll()
+            fingerprintTokens.removeAll()
+            unrecognizedSince.removeAll()
+        }
+        // A re-arm (`restoringWindows: false`) keeps the bookkeeping on
+        // purpose. `liveTokens` + `bannerElements` are how the next scan tells
+        // "this is the banner I already mirrored" from "this is a new banner
+        // that happens to reuse the same AX identifier", and identifiers *are*
+        // reused: 健康's `SleepScoreResultsNotification` and Bevel's
+        // `journalNightlyPushNotification` are fixed request strings, not
+        // per-instance ones. Dropping them here made every re-arm re-open the
+        // swallow window for those notification kinds.
+        // `fingerprintLastSeen` survives in both cases: it IS the cross-re-arm
+        // memory that keeps a parked alert banner from re-delivering, and the
+        // 90s grace period retires it on its own.
         stopKeepaliveScan()
         if restoringWindows {
             restoreAllWindows()
@@ -678,6 +697,7 @@ final class NotificationWatcher {
             guard let appElement else { return }
             refreshObservedWindows()
             let now = Date()
+            let coldStart = lastScanAt == nil
             let resumedAfterSuspension = lastScanAt.map {
                 now.timeIntervalSince($0) > suspensionGapThreshold
             } ?? false
@@ -697,6 +717,7 @@ final class NotificationWatcher {
                     // user opens Notification Center onto nothing (upstream
                     // issue #1577).
                     restoreWindow(window)
+                    unrecognizedSince.removeValue(forKey: key(for: window))
 
                 case .empty:
                     // Deliberately nothing to the window. A window that no
@@ -704,6 +725,25 @@ final class NotificationWatcher {
                     // must stay parked: that is what stops the system popup from
                     // being painted on screen at all.
                     unmirroredWindows.remove(key(for: window))
+                    unrecognizedSince.removeValue(forKey: key(for: window))
+
+                case .unrecognized:
+                    // The window is showing text but no banner subrole we know.
+                    // Keeping it parked would make that content permanently
+                    // invisible, so hand it back — but only once it has stayed
+                    // like this for a moment, otherwise a banner's teardown
+                    // (text nodes outlive the banner by a frame) would replay
+                    // the dismissal on screen.
+                    let windowKey = key(for: window)
+                    let since = unrecognizedSince[windowKey] ?? now
+                    unrecognizedSince[windowKey] = since
+                    if now.timeIntervalSince(since) >= 2, parkedWindows[windowKey] != nil {
+                        NSLog("[boringNotch] window holds content we cannot read as a banner — handing it back to the screen")
+                        trace("unrecognized window handed back")
+                        restoreWindow(window)
+                        unmirroredWindows.insert(windowKey)
+                        unrecognizedSince.removeValue(forKey: windowKey)
+                    }
 
                 case .banners(let banners):
                     let windowKey = key(for: window)
@@ -722,12 +762,28 @@ final class NotificationWatcher {
                     var allowed: [String] = []
                     var arrivals: [(token: String, notification: CapturedNotification)] = []
                     var needsNative = false
+                    /// Banners in this window that we are NOT going to mirror.
+                    /// A window is hidden as a whole, so one of these means the
+                    /// window has to go back on screen — see below.
+                    var unmirrored = 0
 
                     for banner in banners {
                         let token = token(for: banner)
                         seen.insert(token)
                         // Already mirrored: don't pay for another AX text walk.
-                        if liveTokens.contains(token) {
+                        // "Already mirrored" has to mean the *same banner*, not
+                        // just the same token: Notification Center reuses its
+                        // request identifiers (健康 `SleepScoreResultsNotification`,
+                        // Bevel `journalNightlyPushNotification` are fixed
+                        // strings), so a brand-new notification can arrive under
+                        // a token we already know while the old banner is still
+                        // parked. Treating token equality as banner equality
+                        // swallowed every one of those. A different AX element
+                        // falls through to `capture` + the fingerprint guard,
+                        // which is what keeps the new message from vanishing.
+                        if liveTokens.contains(token),
+                           let known = bannerElements[token],
+                           CFEqual(known, banner) {
                             if let fp = tokenFingerprints[token] {
                                 fingerprintLastSeen[fp] = Date()
                             }
@@ -735,7 +791,10 @@ final class NotificationWatcher {
                             continue
                         }
                         let notification = capture(banner, token: token)
-                        guard mirrorAllApps || isAllowed(notification) else { continue }
+                        guard mirrorAllApps || isAllowed(notification) else {
+                            unmirrored += 1
+                            continue
+                        }
                         // The banner wants typing (reply / 回复). Mirroring it
                         // would take away the only way to answer, so hand the
                         // whole window back and let the system own it.
@@ -744,13 +803,27 @@ final class NotificationWatcher {
                             needsNative = true
                             break
                         }
-                        // Content dedup: this banner was mirrored before and
-                        // its fingerprint is still inside the grace period
-                        // (it never left the center — the host window was
-                        // merely rebuilt or the watcher re-armed). Register
-                        // it as mirrored WITHOUT delivering it again.
+                        // Content dedup: this banner was already mirrored and
+                        // its fingerprint is still inside the grace period —
+                        // it never left the center, it was merely rebuilt.
+                        // Register it as mirrored WITHOUT delivering it again.
+                        //
+                        // Only the SAME banner identity suppresses, meaning the
+                        // same AX identifier *and* the same text. An earlier
+                        // version suppressed on content alone and swallowed
+                        // every repeated alert: 2026-11-18 13:39, a second
+                        // osascript banner arrived under a fresh token with
+                        // identical text, was logged `silent re-mirror`, and
+                        // produced no card. Identifiers are what
+                        // NotificationCenter reuses for "the same banner"
+                        // (健康 `SleepScoreResultsNotification`, Bevel
+                        // `journalNightlyPushNotification`), so requiring a
+                        // token match still covers the stale-replay case that
+                        // this guard exists for.
                         let fingerprint = Self.contentFingerprint(of: notification)
-                        if fingerprintLastSeen[fingerprint] != nil {
+                        let twinToken = fingerprintTokens[fingerprint]
+                        let sameBanner = twinToken == token
+                        if fingerprintLastSeen[fingerprint] != nil, sameBanner {
                             trace("silent re-mirror token=\(token)")
                             allowed.append(token)
                             liveTokens.insert(token)
@@ -759,12 +832,18 @@ final class NotificationWatcher {
                             fingerprintLastSeen[fingerprint] = Date()
                             continue
                         }
-                        if resumedAfterSuspension {
-                            // First scan after sleep/suspension: everything
-                            // in the host is a pre-sleep leftover. Register
-                            // it silently so later scans keep it suppressed,
-                            // but do not burst it onto the user.
-                            trace("silent wake-up banner token=\(token)")
+                        if resumedAfterSuspension || coldStart {
+                            // Nothing that is already sitting in Notification
+                            // Center when we start watching belongs to this
+                            // session. Register it silently so later scans
+                            // keep it suppressed, but do not announce it:
+                            // a cold start (app relaunch, every rebuild) used
+                            // to replay every parked banner at once — five
+                            // stale alerts on 2026-11-18 13:48, each replacing
+                            // the previous card within 60 ms, so the user saw
+                            // one and lost the rest. The banners are still in
+                            // Notification Center for anyone who opens it.
+                            trace("silent first-scan banner token=\(token) cold=\(coldStart)")
                             allowed.append(token)
                             liveTokens.insert(token)
                             tokenFingerprints[token] = fingerprint
@@ -781,14 +860,30 @@ final class NotificationWatcher {
                         fingerprintLastSeen[fingerprint] = Date()
                     }
 
-                    if needsNative {
+                    if needsNative || unmirrored > 0 {
+                        // Something in this window is NOT going to be shown by
+                        // the notch — a call that must stay answerable, or a
+                        // banner from an app the filter excludes. The window
+                        // holds all of them, so it goes back on screen whole:
+                        // parking it would hide the one we do not mirror, and
+                        // the user would never learn it existed. Nothing is
+                        // delivered this round either — the system banner is
+                        // already showing the same content, so a card on top
+                        // would just duplicate it.
                         if wasParked { restoreWindow(window) }
                         unmirroredWindows.insert(windowKey)
-                        // Anything we staged for this window is moot now.
                         for banner in banners {
                             let token = token(for: banner)
                             bannerElements.removeValue(forKey: token)
                             bannerWindows.removeValue(forKey: token)
+                            liveTokens.remove(token)
+                            if let fp = tokenFingerprints.removeValue(forKey: token) {
+                                fingerprintTokens.removeValue(forKey: fp)
+                                fingerprintLastSeen.removeValue(forKey: fp)
+                            }
+                        }
+                        if unmirrored > 0 {
+                            trace("window handed back: \(unmirrored) banner(s) not mirrored")
                         }
                         continue
                     }
@@ -833,6 +928,7 @@ final class NotificationWatcher {
             let liveKeys = Set(windows.map { key(for: $0) })
             parkedWindows = parkedWindows.filter { liveKeys.contains($0.key) }
             unmirroredWindows.formIntersection(liveKeys)
+            unrecognizedSince = unrecognizedSince.filter { liveKeys.contains($0.key) }
             trace("scan end parked=\(parkedWindows.count) live=\(liveTokens.count) fps=\(fingerprintLastSeen.count)")
         }
     }
@@ -841,6 +937,11 @@ final class NotificationWatcher {
         case panel
         case empty
         case banners([AXUIElement])
+        /// Text in the window that belongs to no banner subrole we know —
+        /// a banner from a macOS build whose AX vocabulary moved on. Kept
+        /// separate from `empty` so the caller can hand the window back
+        /// instead of leaving the content parked and invisible.
+        case unrecognized
     }
 
     private func inspect(_ root: AXUIElement) -> WindowContents {
@@ -849,6 +950,12 @@ final class NotificationWatcher {
         ]
         var visited = Set<CFHashCode>()
         var banners: [AXUIElement] = []
+        /// Banner text lives in `AXStaticText` nodes whose identifier is
+        /// `title` / `subtitle` / `body`. Finding one of those without ever
+        /// finding a banner subrole is the signature of a banner we do not
+        /// recognise — the one case where staying parked would hide a
+        /// notification for good.
+        var sawBannerText = false
 
         while let node = pending.popLast() {
             let element = node.element
@@ -873,6 +980,13 @@ final class NotificationWatcher {
 
             if !node.insideBanner, NotificationPanelDetection.isBanner(subrole: subrole) {
                 banners.append(element)
+            } else if !node.insideBanner, !node.insideList,
+                      let identifier,
+                      ["title", "subtitle", "body"].contains(identifier),
+                      element.string(kAXRoleAttribute) == "AXStaticText" {
+                // Static-text nodes carry no subrole (measured: AXRole only),
+                // so the role is what identifies them.
+                sawBannerText = true
             }
 
             let childInsideBanner = node.insideBanner || NotificationPanelDetection.isBanner(subrole: subrole)
@@ -883,7 +997,10 @@ final class NotificationWatcher {
             })
         }
 
-        return banners.isEmpty ? .empty : .banners(banners)
+        if !banners.isEmpty { return .banners(banners) }
+        // Text but no banner: do NOT report `empty` — the caller would leave
+        // the window parked and the text would never be seen.
+        return sawBannerText ? .unrecognized : .empty
     }
 
     private func token(for banner: AXUIElement) -> String {

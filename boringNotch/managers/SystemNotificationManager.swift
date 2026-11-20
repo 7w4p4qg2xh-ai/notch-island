@@ -36,42 +36,82 @@ final class SystemNotificationManager: ObservableObject {
     @Published private(set) var queuedNotifications: [SystemNotification] = []
 
     private let queueLimit = 5
-    /// Keep in sync with `ContentView.notificationPeekSeconds`. 8s was too
-    /// short to read a full card, especially when it lands on the other
-    /// display; 12s matches the automatic peek countdown.
-    private let displayDuration: TimeInterval = 12
+    /// 通知在岛上的展示时长（秒）。**唯一来源**：ContentView 的自动收起
+    /// 倒计时直接读这个常量。旧实现两处各写一个 12，靠注释"必须保持一致"
+    /// 维生，改一处就会出现"卡片先没了、面板还开着"（docs/02 11-18）。
+    /// 8s 读不完一整屏正文，12s 是一次实测后的取值。
+    static let displayDuration: TimeInterval = 12
+    /// 指针离开后的最短停留。旧实现固定 2 秒，读一半走开就再也看不到这条。
+    static let minimumGrace: TimeInterval = 6
+
+    /// 当前卡片还剩多少展示时间。被 hover 冻结时不再流逝，恢复时从这里续算，
+    /// 而不是重新起一个倒计时——否则"看一眼再走开"会把剩余时间清零。
+    private var remaining: TimeInterval = SystemNotificationManager.displayDuration
+    /// 指针进入卡片的时刻；`nil` = 没人在看，倒计时正常走。
+    private var heldAt: Date?
     private var dismissTask: Task<Void, Never>?
     private var notificationObserver: NSObjectProtocol?
     private var isUserPresent = false
-    /// Last time each content fingerprint was actually shown. Rebuilding the
-    /// AX observer re-scans banners still sitting in Notification Center, so
-    /// the very same payload can arrive again without any new system event
-    /// (docs/04 Q). Keyed on CONTENT, not the banner's AX token: the host
-    /// window rebuild rewrites the identifier (`targetBedTimeReminder` →
-    /// something else), which is how one stale alert popped up 12 times on
-    /// 2026-11-16 morning despite this guard. The helper dedups too — this is
-    /// the second line of defence, chiefly for helper restarts.
+    /// Last time each *banner* was actually shown, keyed by token + content.
+    ///
+    /// The helper dedups too, but its memory dies with its process; this is
+    /// the second line of defence for a helper restart that re-scans a banner
+    /// still sitting in Notification Center.
+    ///
+    /// The key deliberately includes the token. Keying on content alone meant
+    /// two genuinely different notifications that happen to read the same —
+    /// the same message twice, a repeated "已连接" alert — lost the second one
+    /// for five minutes. A re-scanned banner keeps its AX identifier (it is
+    /// the same element in the same process), so including the token costs
+    /// nothing on the stale-replay path this guard exists for.
     private var recentlyShown: [String: Date] = [:]
     private let recentTokenWindow: TimeInterval = 300
 
-    /// One-shot flag: a control on the notification card (✕ / reveal / queue /
-    /// banner action / open-app) was tapped, and that same mouse event must
-    /// NOT also reach the island's outer `.onTapGesture` (ContentView) —
-    /// SwiftUI delivers the event to the deepest view first, but the outer
-    /// gesture still fires afterwards, so "press ✕" reads as "press the
-    /// island" and the whole panel opens (2026-11-16 user report).
-    /// The control's action arms this flag; the outer tap closure consumes
-    /// it. The 0.4s decay is a safety net for when the outer gesture never
-    /// fires (the Button swallowed the event), so a stale flag cannot eat the
-    /// next genuine island tap.
-    var suppressOpenTap = false
+    private nonisolated static func dedupKey(token: String, fingerprint: String) -> String {
+        token + "\u{1F}" + fingerprint
+    }
+
+    /// A control on the notification card (✕ / reveal / queue / banner action /
+    /// open-app) was tapped, and that same mouse event must NOT also reach the
+    /// island's outer `.onTapGesture` (ContentView) — SwiftUI delivers the
+    /// event to the deepest view first, but the outer gesture still fires
+    /// afterwards, so "press ✕" reads as "press the island" and the whole
+    /// panel opens (2026-11-16 user report).
+    ///
+    /// 11-18 改判定依据：旧写法是一个 Bool + 0.4s 自然过期。问题是 Button
+    /// 一旦把事件吃掉（外层手势不跑），旗标就得干等 0.4s 才失效，这期间用户
+    /// 真的去点岛会被白白吞掉一次——就是「连点回归」的隐患。改成按 AppKit
+    /// **事件号**判定：控件的 action 与外层手势在同一次事件派发里跑，事件号
+    /// 必然相同；用户下一次点击必然是不同的号，所以该吞的吞、不该吞的一次都
+    /// 不吞，不依赖任何时间猜测。
+    private var suppressedOpenEvent: Int?
+    /// 拿不到事件号时的兜底（AX 按下的 action、`NSApp.currentEvent` 为 nil）：
+    /// 80ms 远小于人手连点间隔，不会误吞下一次真实点击。
+    private var suppressedOpenFallbackDeadline: Date?
+    private let suppressedOpenFallbackWindow: TimeInterval = 0.08
 
     private func armOpenTapSuppression() {
-        suppressOpenTap = true
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(0.4))
-            self?.suppressOpenTap = false
+        if let event = NSApp.currentEvent {
+            suppressedOpenEvent = event.eventNumber
+            suppressedOpenFallbackDeadline = nil
+        } else {
+            suppressedOpenEvent = nil
+            suppressedOpenFallbackDeadline = Date().addingTimeInterval(suppressedOpenFallbackWindow)
         }
+    }
+
+    /// 外层的 `.onTapGesture` 问一句「这一轮要不要吞掉」。
+    /// 返回 true = 这次点击属于某个已处理的控件，不要再开岛。
+    func consumeSuppressedOpenTap() -> Bool {
+        if let armed = suppressedOpenEvent {
+            suppressedOpenEvent = nil
+            return NSApp.currentEvent?.eventNumber == armed
+        }
+        if let deadline = suppressedOpenFallbackDeadline {
+            suppressedOpenFallbackDeadline = nil
+            return Date() < deadline
+        }
+        return false
     }
 
     private init() {
@@ -106,15 +146,27 @@ final class SystemNotificationManager: ObservableObject {
         isUserPresent = true
         dismissTask?.cancel()
         dismissTask = nil
+        if heldAt == nil { heldAt = Date() }
     }
 
-    func resumeDismiss(after delay: TimeInterval = 2) {
+    /// 指针离开：从「剩余时间」续算，且不再清空队列。
+    ///
+    /// 旧实现有两个问题（2026-11-18 审查 P0-4）：
+    /// ① 第一行就 `queuedNotifications.removeAll()`——指针一动，排队中的后续
+    ///    通知当场被丢掉；
+    /// ② 固定 2 秒，与 12 秒的展示时长互相矛盾，读一半走开就永久看不到。
+    /// 现在：把「被冻结的这段时间」从剩余里扣掉，保底 `minimumGrace`。
+    func resumeDismiss(after delay: TimeInterval? = nil) {
         isUserPresent = false
-        queuedNotifications.removeAll()
+        if let heldAt {
+            remaining = max(remaining - Date().timeIntervalSince(heldAt), Self.minimumGrace)
+            self.heldAt = nil
+        }
         guard let notification = activeNotification else { return }
         dismissTask?.cancel()
+        let wait = delay ?? remaining
         dismissTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(delay))
+            try? await Task.sleep(for: .seconds(wait))
             guard !Task.isCancelled else { return }
             await self?.dismissActive(token: notification.id)
         }
@@ -125,11 +177,15 @@ final class SystemNotificationManager: ObservableObject {
         dismissTask?.cancel()
         dismissTask = nil
         activeNotification = nil
-        if isUserPresent {
-            promoteNext()
-        } else {
-            queuedNotifications.removeAll()
-        }
+        // 11-18：`else { queuedNotifications.removeAll() }` 已删除。指针离开
+        // 不等于"读完了"，排队中的通知应当留到用户下次回到岛上（或点 +N）。
+        // 只有 stop()（关闭监听）与显式 clear 才清队列。
+        //
+        // 11-19：队列必须在这里推进。`+N` 徽标挂在卡片上，卡片一到期消失，
+        // 队列就没有任何可见载体——突发 3 条时只有第 1 条真正被看到，另外 2 条
+        // 要等"下一条通知把卡片带回来"才偶然露脸。到期即取下一条，队列本身
+        // 仍然不清空（指针回来还能继续翻），只是每条都拿到自己的展示时间。
+        promoteNext()
     }
 
     func showNextQueued() {
@@ -181,14 +237,15 @@ final class SystemNotificationManager: ObservableObject {
             subtitle: payload["subtitle"],
             body: payload["body"]
         )
+        let key = Self.dedupKey(token: token, fingerprint: fingerprint)
         recentlyShown = recentlyShown.filter {
             now.timeIntervalSince($0.value) < recentTokenWindow
         }
-        if recentlyShown[fingerprint] != nil {
-            // Same stale banner re-scanned after an observer re-arm. Refresh
-            // the timestamp so a banner that never leaves the center cannot
+        if recentlyShown[key] != nil {
+            // Same banner, re-scanned after an observer re-arm. Refresh the
+            // timestamp so a banner that never leaves the center cannot
             // resurface every few minutes.
-            recentlyShown[fingerprint] = now
+            recentlyShown[key] = now
             return
         }
         bnDebugLog(
@@ -221,16 +278,33 @@ final class SystemNotificationManager: ObservableObject {
             receivedAt: Date(),
             actions: Self.decodeActions(payload["actions"])
         )
-        guard isAllowed(notification) else { return }
+        guard isAllowed(notification) else {
+            // The helper has already parked this banner, so simply dropping it
+            // here is exactly the "notification disappeared" case: the system
+            // banner is off screen and no card is ever drawn. Hand the banner
+            // back instead — a duplicate filter decision must never cost the
+            // notification itself.
+            bnDebugLog("drop token=\(token.prefix(6)) not in allow list — revealing banner")
+            Task { _ = await XPCHelperClient.shared.revealNotification(token: token) }
+            return
+        }
         guard activeNotification == nil else {
-            guard isUserPresent else {
-                show(notification)
-                return
-            }
+            // A burst used to overwrite the card instantly: five alerts
+            // arriving within 60 ms (2026-11-18 13:48) left only the last one
+            // readable, because `show()` replaced `activeNotification` each
+            // time. Queue them instead — the card keeps the one already on
+            // screen, the queue is surfaced as the `+N` pill on the card
+            // (`NotificationLiveActivity.controls`), and tapping it advances
+            // (`showNextQueued`). Nothing in a burst is dropped on the floor.
             guard !queuedNotifications.contains(where: { $0.id == notification.id }) else { return }
             queuedNotifications.append(notification)
             if queuedNotifications.count > queueLimit {
-                queuedNotifications.removeFirst()
+                // The oldest card will never be drawn; its banner is parked
+                // off screen, so dropping the struct silently is the same as
+                // deleting the notification. Give it back to the system UI.
+                let dropped = queuedNotifications.removeFirst()
+                bnDebugLog("queue overflow — revealing token=\(dropped.id.prefix(6))")
+                Task { _ = await XPCHelperClient.shared.revealNotification(token: dropped.id) }
             }
             return
         }
@@ -238,21 +312,26 @@ final class SystemNotificationManager: ObservableObject {
     }
 
     private func show(_ notification: SystemNotification) {
-        recentlyShown[Self.contentFingerprint(
-            appName: notification.appName,
-            title: notification.title,
-            subtitle: notification.subtitle,
-            body: notification.body
+        recentlyShown[Self.dedupKey(
+            token: notification.id,
+            fingerprint: Self.contentFingerprint(
+                appName: notification.appName,
+                title: notification.title,
+                subtitle: notification.subtitle,
+                body: notification.body
+            )
         )] = Date()
         bnDebugLog("show token=\(notification.id.prefix(6)) app=\(notification.appName ?? "-")")
         dismissTask?.cancel()
+        remaining = Self.displayDuration
+        heldAt = nil
         activeNotification = notification
         scheduleDismiss(for: notification.id)
     }
 
     private func scheduleDismiss(for token: String) {
         dismissTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(self?.displayDuration ?? 12))
+            try? await Task.sleep(for: .seconds(self?.remaining ?? Self.displayDuration))
             guard !Task.isCancelled else { return }
             await self?.dismissActive(token: token)
         }

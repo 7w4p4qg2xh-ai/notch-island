@@ -32,16 +32,19 @@ struct NotificationSettingsView: View {
                 Defaults.Toggle(key: .notificationLiveActivity) {
                     Text("Show notifications in the notch")
                 }
+                .help("Requires Accessibility. Notifications show inside the notch instead of system banners.")
 
                 Defaults.Toggle(key: .notificationAutoExpand) {
                     Text("Auto-expand to show the message")
                 }
                 .disabled(!notificationLiveActivity)
+                .help("Opens the card automatically when a notification arrives.")
 
                 Defaults.Toggle(key: .notificationPassthroughActions) {
                     Text("Keep incoming calls on the system banner")
                 }
                 .disabled(!notificationLiveActivity)
+                .help("Call banners such as FaceTime stay on the system so you can answer them.")
             } footer: {
                 Text("Requires \(AccessibilityPermission.displayName). Messages — including ones with a Reply button — stay in the notch; calls stay where you can answer them.")
                     .font(.caption)

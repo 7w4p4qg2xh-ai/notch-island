@@ -130,9 +130,11 @@ struct NotchSettingsView: View {
             Defaults.Toggle(key: .hideIdlePlateOnNonNotch) {
                 Text("Hide the island when idle")
             }
+            .help("Hides the floating island when nothing is playing or shown.")
             Defaults.Toggle(key: .floatingPillOnNonNotchDisplay) {
                 Text("Enable the floating island (notifications, music, panel)")
             }
+            .help("Turns the notch into a floating pill on displays without a hardware notch.")
         } header: {
             Text("Sizing")
         }
@@ -145,24 +147,29 @@ struct NotchSettingsView: View {
             islandSizeSlider(
                 "Card width", value: $islandCardWidth, range: 340...560, step: 2)
             islandSizeSlider(
-                "Panel width", value: $islandPanelWidth, range: 400...720, step: 5)
+                // 上限 600 而不是 720：窗口画布 640pt、面板两侧各 12pt 内边距，
+                // 再宽就会被窗口直接裁掉（11-18 实测）。
+                "Panel width", value: $islandPanelWidth, range: 400...600, step: 5)
             islandSizeSlider(
-                "Panel height", value: $islandPanelHeight, range: 120...300, step: 5)
+                // 下限 130：内容本身要 ~130pt，给到 120 会裁掉播放控件（11-18 实测）。
+                "Panel height", value: $islandPanelHeight, range: 130...260, step: 5)
             islandSizeSlider(
-                "Corner radius", value: $islandCardCornerRadius, range: 14...44, step: 1)
+                "Corner radius", value: $islandCardCornerRadius, range: 18...34, step: 1)
 
             Defaults.Toggle(key: .closedPillGlassEnabled) {
                 Text("Glass capsule while collapsed")
             }
+            .help("Applies the liquid glass material to the collapsed capsule.")
             Defaults.Toggle(key: .islandMusicCardEnabled) {
                 Text("Show now-playing card")
             }
+            .help("Shows a music card on the island while audio is playing.")
 
             Button("Reset island sizes") {
                 islandCardWidth = 408
-                islandPanelWidth = 480
-                islandPanelHeight = 150
-                islandCardCornerRadius = 36
+                islandPanelWidth = 580
+                islandPanelHeight = 136
+                islandCardCornerRadius = 26
             }
         } header: {
             Text("Floating island")
@@ -198,9 +205,11 @@ struct NotchSettingsView: View {
             Defaults.Toggle(key: .openNotchOnHover) {
                 Text("Open notch on hover")
             }
+            .help("Expands the notch when the pointer rests on it for the hover delay.")
             Defaults.Toggle(key: .enableHaptics) {
                 Text("Enable haptic feedback")
             }
+            .help("Plays a tick on the trackpad when gestures trigger an action.")
             Toggle("Remember last tab", isOn: $coordinator.openLastTabByDefault)
             if openNotchOnHover {
                 Slider(value: $minimumHoverDuration, in: 0...1, step: 0.1) {

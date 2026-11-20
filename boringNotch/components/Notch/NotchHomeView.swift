@@ -145,7 +145,9 @@ struct MusicControlsView: View {
         // 11-07: the user asked for tighter VERTICAL spacing in the expanded
         // player. Only text-side gaps move — the plate, artwork, header and
         // progress-bar height are untouched, so nothing can be clipped.
-        VStack(alignment: .leading, spacing: 4) {
+        // 11-18: 板高从 150 收到 136（用户嫌「上下太长、左右太短」），这两处
+        // spacing 再从 4 收到 2，给矮板留出余量；进度条高度和封面尺寸一律不动。
+        VStack(alignment: .leading, spacing: 2) {
             songInfoAndSlider
             slotToolbar
         }
@@ -159,7 +161,8 @@ struct MusicControlsView: View {
                 musicSlider
             }
         }
-        .padding(.top, 4)
+        // 11-18: 4 → 2。板高收到 136 后这块顶部留白就是纯浪费。
+        .padding(.top, 2)
         .padding(.leading, 5)
     }
 

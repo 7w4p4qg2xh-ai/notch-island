@@ -22,9 +22,6 @@ struct AppearanceSettingsView: View {
     @Default(.glassDispersion) private var glassDispersion
     @Default(.glassHighlight) private var glassHighlight
     @Default(.glassFollowsAppleMetrics) private var glassFollowsAppleMetrics
-    @Default(.glassAdaptiveScrim) private var glassAdaptiveScrim
-    @Default(.glassBackdropSampling) private var glassBackdropSampling
-    @State private var capturePermission = BackdropLuminance.hasPermission
     @State private var customAccentColor: Color = .accentColor
     @State private var selectedPresetColor: PresetAccentColor?
 
@@ -39,10 +36,6 @@ struct AppearanceSettingsView: View {
         .navigationTitle("Appearance")
         .onAppear {
             initializeAccentColorState()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            capturePermission = BackdropLuminance.hasPermission
-            BackdropLuminance.refreshPermission()
         }
     }
 
@@ -164,12 +157,39 @@ struct AppearanceSettingsView: View {
         return false
     }
 
+    /// 私有管线（`CABackdropLayer` / `CASDFLayer` / `CAFilter("glassBackground")`）
+    /// 在系统小版本里被改名或移除时，开关打开也没有玻璃。这时必须让用户看到
+    /// 原因——否则现场表现是"打开了但没效果"，只会被理解成"这功能坏了"
+    /// （审查 P2-6）。
+    private var pipelineUnavailable: Bool {
+        enableLiquidGlass && liquidGlassSupported && !LiquidGlassPipeline.isSupported
+    }
+
     private var liquidGlassSection: some View {
         Section {
             Defaults.Toggle(key: .enableLiquidGlass) {
                 Text("开启液态玻璃背景")
             }
             .disabled(!liquidGlassSupported)
+
+            if pipelineUnavailable {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("当前系统不支持该材质，已回落为纯黑底板")
+                        Text("通常发生在 macOS 小版本更新后。可复制诊断信息提交问题反馈。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("复制诊断信息") {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(LiquidGlassPipeline.diagnosticsSummary, forType: .string)
+                    }
+                }
+            }
 
             if enableLiquidGlass && liquidGlassSupported {
                 Defaults.Toggle(key: .liquidGlassClear) {
@@ -206,41 +226,6 @@ struct AppearanceSettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-                Defaults.Toggle(key: .glassAdaptiveScrim) {
-                    Text("亮壁纸时补暗化层（苹果 clear 规则）")
-                }
-                Text(
-                    "苹果规定 clear 档在亮背景上必须加约 35% 的黑色暗化层，否则字站不住。"
-                    + "这条会让面板变实，所以默认关。"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-                Defaults.Toggle(key: .glassBackdropSampling) {
-                    Text("按玻璃背后真实内容自动调整（苹果原生）")
-                }
-                if glassBackdropSampling {
-                    HStack(spacing: 8) {
-                        Text(capturePermission ? "屏幕录制：已授权" : "屏幕录制：未授权")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if !capturePermission {
-                            Button("去开启") {
-                                BackdropLuminance.requestPermission()
-                                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-                                    NSWorkspace.shared.open(url)
-                                }
-                            }
-                        }
-                    }
-                    Text(
-                        "苹果规定：背景够暗时 clear 玻璃不加暗化层、面层不垫灰，靠边缘高光勾出玻璃；"
-                        + "背景亮时才加约 35% 黑。为此需要屏幕录制权限读取玻璃背后的真实亮度"
-                        + "（只算一个亮度数字，不保存、不上传）。授权后请退出并重开一次 app。"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
             }
         } header: {
             Text("液态玻璃")

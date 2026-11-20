@@ -242,6 +242,10 @@ struct NotificationExpandedView: View {
     private var bodySize: CGFloat { compactLayout ? 12.5 : 14 }
     private var bodyLineLimit: Int { compactLayout ? 1 : 2 }
     private var controlSize: CGFloat { compactLayout ? 16 : 18 }
+    /// 命中区域。HIG：桌面端可点目标最小 20×20、推荐 28×28。视觉仍然是
+    /// 16pt 的小圆（视觉密度不变），但指针容错按 28pt 给——这两个按钮紧挨
+    /// 着卡片右缘、又在屏幕最顶端，偏 8 像素就会点到"清除"，而清除不可撤销。
+    private var hitSize: CGFloat { 28 }
 
     /// The system banner insets its icon 16pt from the card edge; 14 keeps the
     /// same optical breathing room on our 408pt card, 10 clears the controls.
@@ -253,8 +257,9 @@ struct NotificationExpandedView: View {
     /// notification pill adds one more item.
     private var controlsWidth: CGFloat {
         let hasQueue = !manager.queuedNotifications.isEmpty
-        let items = hasQueue ? 3 : 2
-        return controlSize * 2 + (hasQueue ? 24 : 0) + 4 * CGFloat(items - 1)
+        // 按命中尺寸算，且钮与钮之间不再留 extra spacing：28pt 的热区已经
+        // 自带 6pt 的视觉留白，再叠 4pt 会把两个热区挤到重叠。
+        return hitSize * 2 + (hasQueue ? 26 : 0)
     }
 
     /// Explicit width for the two-line column. Passing a real number down
@@ -327,6 +332,7 @@ struct NotificationExpandedView: View {
                 // .infinity` cannot fix it, because the enclosing stack offers
                 // only the ideal width; the column has to be sized outright.
                 .frame(width: compactColumnWidth, alignment: .leading)
+                .accessibilityElement(children: .contain)
                 .background {
                     GeometryReader { proxy in
                         Color.clear
@@ -374,8 +380,22 @@ struct NotificationExpandedView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(notification.appName ?? "App") notification")
-        .accessibilityHint("Opens \(notification.appName ?? "the app")")
+        // 旧文案只报"某 App 的通知"，而这套功能的全部价值就是"不用看也
+        // 知道来了什么"。改为一句完整摘要：谁、说了什么。
+        .accessibilityLabel(cardAccessibilityLabel)
+        .accessibilityHint("打开 \(notification.appName ?? "来源 App")")
+    }
+
+    /// VoiceOver 的一整句摘要。比逐个元素朗读更接近"扫一眼"的体验。
+    private var cardAccessibilityLabel: String {
+        let app = notification.appName ?? "通知"
+        if compactLayout {
+            let detail = compactDetail.isEmpty ? "" : "，\(compactDetail)"
+            return "\(app)，\(compactHeadline)\(detail)"
+        }
+        let title = notification.title ?? ""
+        let body = notification.body ?? notification.subtitle ?? ""
+        return [app, title, body].filter { !$0.isEmpty }.joined(separator: "，")
     }
 
     /// One large app icon, no secondary badge. The user decided on 11-07
@@ -550,7 +570,7 @@ struct NotificationExpandedView: View {
     }
 
     private var controls: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 0) {
             if !manager.queuedNotifications.isEmpty {
                 Button {
                     manager.showNextQueued()
@@ -561,9 +581,12 @@ struct NotificationExpandedView: View {
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
                         .background(.white.opacity(0.14), in: Capsule())
+                        .frame(minHeight: hitSize)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Show next queued notification")
+                .help("查看排队中的下一条")
+                .accessibilityLabel("查看排队中的下一条通知")
             }
 
             Button {
@@ -572,12 +595,15 @@ struct NotificationExpandedView: View {
                 Image(systemName: "arrow.up.right.square")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.white)
-                        .frame(width: controlSize, height: controlSize)
-                        .background(.white.opacity(0.1), in: Circle())
+                    .frame(width: controlSize, height: controlSize)
+                    .background(.white.opacity(0.1), in: Circle())
+                    // 视觉 16pt、热区 28pt：HIG 的桌面最小/推荐值。
+                    .frame(width: hitSize, height: hitSize)
+                    .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .help("Show the real banner")
-            .accessibilityLabel("Show this notification on screen")
+            .help("在屏幕上显示系统横幅")
+            .accessibilityLabel("在屏幕上显示该通知")
 
             Button {
                 manager.clear(notification)
@@ -585,12 +611,14 @@ struct NotificationExpandedView: View {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.white)
-                        .frame(width: controlSize, height: controlSize)
-                        .background(.white.opacity(0.1), in: Circle())
+                    .frame(width: controlSize, height: controlSize)
+                    .background(.white.opacity(0.1), in: Circle())
+                    .frame(width: hitSize, height: hitSize)
+                    .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .help("清除通知（从通知中心移除）")
-            .accessibilityLabel("Clear notification")
+            .accessibilityLabel("清除该通知")
         }
     }
 

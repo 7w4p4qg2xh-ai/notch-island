@@ -216,8 +216,10 @@ final class MediaKeyInterceptor {
                         KeyboardBacklightManager.shared.setRelative(delta: delta)
                     }
                 } else {
+                    // Focus-screen brightness: F1/F2 follows the display under the mouse.
+                    // Built-in uses IOKit, external uses DDC — both inside the helper.
                     Task { @MainActor in
-                        BrightnessManager.shared.setRelative(delta: delta)
+                        BrightnessManager.shared.setRelativeOnFocusedScreen(delta: delta)
                     }
                 }
             }
@@ -389,7 +391,7 @@ final class MediaKeyInterceptor {
             if keyboard {
                 KeyboardBacklightManager.shared.setRelative(delta: delta)
             } else {
-                BrightnessManager.shared.setRelative(delta: delta)
+                BrightnessManager.shared.setRelativeOnFocusedScreen(delta: delta)
             }
         }
     }

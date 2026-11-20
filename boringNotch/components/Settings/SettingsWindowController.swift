@@ -25,6 +25,10 @@ class SettingsWindowController: NSWindowController {
 
         super.init(window: window)
 
+        // 11-18：内容层 .frame(minWidth: 700) 之后，这里把窗口拖动的下限
+        // 也兜住，两边一致才不会出现"窗口比内容窄、右半被裁"。
+        window.contentMinSize = NSSize(width: 700, height: 450)
+
         setupWindow()
     }
 

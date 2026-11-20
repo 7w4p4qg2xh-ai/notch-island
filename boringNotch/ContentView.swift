@@ -172,7 +172,9 @@ struct ContentView: View {
     private var showsConnectionCard: Bool {
         usesFloatingIsland
             && vm.notchState == .closed
-            && !vm.hideOnClosed
+            // 11-18：连接卡是插耳机的即时反馈，全屏隐藏不能吞它
+            // （isFeedbackForcingIsland 已含 expandingView 活跃判定）。
+            && (!vm.hideOnClosed || vm.isFeedbackForcingIsland)
             && coordinator.expandingView.show
             && coordinator.expandingView.type == .peripheralBattery
             && Defaults[.peripheralBatteryEnabled]
@@ -207,7 +209,8 @@ struct ContentView: View {
         vm.hasNotch
             && !usesFloatingIsland
             && vm.notchState == .closed
-            && !vm.hideOnClosed
+            // 11-18：与 showsConnectionCard 同理，插耳机反馈不被全屏隐藏吞掉。
+            && (!vm.hideOnClosed || vm.isFeedbackForcingIsland)
             && (
                 (coordinator.expandingView.show
                     && coordinator.expandingView.type == .peripheralBattery
@@ -315,7 +318,13 @@ struct ContentView: View {
     /// only ~66pt tall and drops to ~16 via `NotchShape.cornerHeightRatio`
     /// (0.24·h, Apple's own ratio). Forcing 36 there made SwiftUI squeeze the
     /// corner into a 1.53:1 ellipse instead of a circle.
-    private var islandCardRadius: CGFloat { CGFloat(islandCardCornerRadiusSetting) }
+    /// 11-18：按 Apple 的卡片圆角收敛。macOS 的通知卡/实时活动外圆角在 26pt
+    /// 上下（HIG › Live Activities）；设置值只作为上限，且不低于 20 —— 低于
+    /// 20 时 42pt 图标与卡片边角并排会显得"边太尖"（用户长期记录的那条观感
+    /// 差异）。同心关系：图标圆角 = 外圆角 − leading inset。
+    private var islandCardRadius: CGFloat {
+        min(max(CGFloat(islandCardCornerRadiusSetting), 20), 26)
+    }
 
     /// Apple HIG "Live Activities" gives iPadOS cards 425–500pt and macOS
     /// (which reuses the iOS sizes) 371–408pt, with heights of 84–160pt. The
@@ -351,8 +360,10 @@ struct ContentView: View {
         // content y=7.5 inside an 84pt card with ~23pt below it).
         CGSize(width: islandCardWidth, height: 0)
     }
-    /// 11-09: 480×150 现在是默认值，实际尺寸来自设置页。
-    /// 高度下限 120 是有意的 —— 再矮会裁掉面板里的播放控件。
+    /// 11-18: 默认改成 580×136（≈4.3:1）。原来 480×150（3.2:1）就是用户抱怨的
+    /// 「上下太长、左右太短」——150 里实际内容只占 ~130，上下各白放 8pt。
+    /// 加宽是零裁剪风险的解法；高度只收到内容还装得下的程度，封面/进度条/控件行不动。
+    /// 尺寸仍来自设置页（宽 400…600，受 640pt 画布约束；高 130…260，低于 130 会裁控件）。
     private var islandPanelSize: CGSize {
         CGSize(width: islandPanelWidthSetting, height: islandPanelHeightSetting)
     }
@@ -865,6 +876,16 @@ struct ContentView: View {
             return max(0.6, scaleFactor)
         }()
 
+        // 11-18：手势预览的三个分路径取值抽成局部量——三元表达式内联在
+        // 巨型 body 里曾把类型检查器推过「unable to type-check in
+        // reasonable time」的阈值，报错行还会随机漂移。
+        let contentScale = islandOwnsPlate ? gestureScale : 1.0
+        let contentAnchor: UnitPoint = islandOwnsPlate ? .center : .top
+        let bodyScale = islandOwnsPlate ? 1.0 : gestureScale
+        let openMinHeight: CGFloat? =
+            (vm.notchState == .open && islandOwnsPlate)
+                ? openNotchHeight.map { $0 * gestureScale } : nil
+
         ZStack(alignment: .top) {
             VStack(spacing: 0) {
                 let mainLayout = NotchLayout()
@@ -889,14 +910,26 @@ struct ContentView: View {
                                 ? (isNotificationPeeking ? 8 : 12)
                                 : 12)
                              : 0)
+                    // 11-18：手势预览从「整树位图拉伸」改为「布局真实增长」。
+                    // 旧做法在最外层 .scaleEffect 拉伸 compositingGroup 压出来的
+                    // 1× 位图——transform 不触发重渲染，玻璃边缘和文字一起发虚。
+                    // 现在板体（玻璃材质 + NotchShape 轮廓）走真实 frame 增长，
+                    // 材质按新尺寸重渲染、轮廓按矢量重画，都是清晰的；只有内容
+                    // 还保留 transform 缩放（小字号瞬态预览，可接受）。
+                    // 浮岛路径在这里缩放内容并按 growth 撑板体；内建刘海屏的
+                    // 板体贴着硬件开孔，布局增长会让板体脱离开孔，所以那条路
+                    // 保持最外层 transform（见 body 末尾的 scaleEffect 分支）。
+                    .scaleEffect(contentScale, anchor: contentAnchor)
                     // One surface only. Give the plate a minimum frame so the
                     // idle state is a real 185×24 capsule and the open state is
                     // a full card, while the background still grows with the
                     // content — a separate glass layer used to leave two
                     // differently coloured plates visible at once.
                     .frame(
-                        minWidth: islandOwnsPlate ? floatingIslandSize.width : nil,
-                        minHeight: islandOwnsPlate ? floatingIslandSize.height : nil,
+                        minWidth: islandOwnsPlate
+                            ? floatingIslandSize.width * gestureScale : nil,
+                        minHeight: islandOwnsPlate
+                            ? floatingIslandSize.height * gestureScale : nil,
                         // The floating card's content is centred inside the
                         // minimum height; an edge-anchored notch plate stays
                         // pinned to the top so it keeps hugging the bezel.
@@ -925,10 +958,16 @@ struct ContentView: View {
                                 // text lines as a notification, so it takes
                                 // the same uniform wash. The 24pt capsule
                                 // stays at 0.25 or it reads as black again.
+                                // 11-18：0.35 → 0.16。材质本身开始承担可读性
+                                // （见 NotchSurfaceBackground.contentLifted
+                                // 的轻微模糊 + 抬黑位），遮罩就不该再独自把
+                                // 整块板压成灰片。Apple 的规则是 clear 玻璃
+                                // 在亮背景上加 35%，我们既然已经向 regular 靠
+                                // 了一半，这层就按同样的比例收回来。
                                 minimumScrim: (showsNotificationCard || showsMusicCard || showsConnectionCard
                                     || (usesFloatingIsland && coordinator.expandingView.show
                                         && coordinator.expandingView.type == .battery))
-                                    ? 0.35
+                                    ? 0.16
                                     : closedPillScrim,
                                 // The closed island is glass too — one material
                                 // for the whole lifecycle, so the capsule no
@@ -942,7 +981,14 @@ struct ContentView: View {
                                 // back to the resting curve on dismiss.
                                 flexed: vm.notchState == .open || showsNotificationCard
                                     || showsMusicCard || showsConnectionCard
-                                    || coordinator.expandingView.show
+                                    || coordinator.expandingView.show,
+                                // 内容层材质：只有"带大量文字的卡片"才向 regular
+                                // 靠（通知 / 音乐 / 耳机连接）。手点开的面板与
+                                // 收起胶囊保持用户已认可的 clear 观感。
+                                contentLifted: showsNotificationCard || showsMusicCard
+                                    || showsConnectionCard
+                                    || (usesFloatingIsland && coordinator.expandingView.show
+                                        && coordinator.expandingView.type == .battery)
                             )
                             // Hairline for the black capsule only: on glass the
                             // material draws its own edge, and a drawn stroke
@@ -1029,7 +1075,10 @@ struct ContentView: View {
                     // plate's own .frame(minHeight:) below follows the same
                     // number, so the glass never runs past the outline.
                     .frame(
-                        minHeight: vm.notchState == .open ? openNotchHeight : nil,
+                        // 11-18：与板体 frame 的 growth 同步——这条 minHeight
+                        // 是 open 态的外层下限，不同步的话上滑关闭手势里外层
+                        // 会把板体撑回原高，布局增长失效。
+                        minHeight: openMinHeight,
                         alignment: .top
                     )
                     .conditionalModifier(true) { view in
@@ -1054,8 +1103,9 @@ struct ContentView: View {
                         // first. Swallow that round: the control's own effect
                         // (clear / reveal / open) already ran, and opening the
                         // panel on top of it reads as "✕ opens the island".
-                        if SystemNotificationManager.shared.suppressOpenTap {
-                            SystemNotificationManager.shared.suppressOpenTap = false
+                        // 11-18：判定依据是 AppKit 事件号（同一次点击才同号），
+                        // 所以只吞掉真正属于控件的那一下，连点时不会误吞。
+                        if SystemNotificationManager.shared.consumeSuppressedOpenTap() {
                             return
                         }
                         if vm.notchState == .closed && !shouldDisplayNowPlayingFallbackNotice {
@@ -1097,7 +1147,9 @@ struct ContentView: View {
                     // the stack falls back to whatever is left instead of
                     // pointing past the end.
                     .onChange(of: liveActivities.count) { _, count in
-                        if activityIndex >= count { activityIndex = max(count - 1, 0) }
+                        // 拆开 max 调用：同样是为了压 body 的类型检查复杂度。
+                        let lastValidIndex = max(count - 1, 0)
+                        if activityIndex >= count { activityIndex = lastValidIndex }
                     }
                     .onChange(of: vm.isPopoverActive) { _, _ in
                         scheduleCloseIfNotHovering(overNotch: vm)
@@ -1108,7 +1160,12 @@ struct ContentView: View {
                         bnDebugLog("idle suppress=\(suppressed) content=\(closedNotchContent) floating=\(usesFloatingIsland)")
                     }
                     .onChange(of: allowsNowPlayingCard) { _, allowed in
-                        bnDebugLog("musiccard allowed=\(allowed) src=\(musicManager.bundleIdentifier ?? "nil") artist=\(musicManager.artistName)")
+                        // 拆开插值：这行在巨型 body 里曾让类型检查器超时
+                        // （unable to type-check in reasonable time），拆成
+                        // 局部常量后表达式变简单，编译秒过。
+                        let src = musicManager.bundleIdentifier ?? "nil"
+                        let artist = musicManager.artistName
+                        bnDebugLog("musiccard allowed=\(allowed) src=\(src) artist=\(artist)")
                     }
                     .sensoryFeedback(.alignment, trigger: haptics)
                     .contextMenu {
@@ -1190,9 +1247,12 @@ struct ContentView: View {
         // The idle capsule IS a plate, so it accepts clicks and hovers like the
         // original notch did; `islandHitShape` keeps that target pill-shaped.
         .allowsHitTesting(panelIsInteractive)
+        // 11-18：浮岛路径已改为布局真实增长（见上面板体 frame 处的注释），
+        // 这里保持 1 避免和布局增长叠加成双重缩放；内建刘海屏的板体贴着
+        // 硬件开孔，不适合布局增长，保留原来的 transform 预览。
         .scaleEffect(
-            x: gestureScale,
-            y: gestureScale,
+            x: bodyScale,
+            y: bodyScale,
             anchor: .top
         )
         .animation(.smooth, value: gestureProgress)
@@ -1260,31 +1320,7 @@ struct ContentView: View {
                             .transition(.opacity)
                     } else if coordinator.expandingView.type == .battery && coordinator.expandingView.show
                         && vm.notchState == .closed && Defaults[.showPowerStatusNotifications] {
-                        HStack(spacing: 0) {
-                            HStack {
-                                Text(batteryModel.statusText)
-                                    .font(.subheadline)
-                                    .foregroundStyle(.white)
-                            }
-
-                            Rectangle()
-                                .fill(.black)
-                                .frame(width: vm.closedNotchSize.width + 10)
-
-                            HStack {
-                                BoringBatteryView(
-                                    batteryWidth: 30,
-                                    isCharging: batteryModel.isCharging,
-                                    isInLowPowerMode: batteryModel.isInLowPowerMode,
-                                    isPluggedIn: batteryModel.isPluggedIn,
-                                    levelBattery: batteryModel.levelBattery,
-                                    maxAdapterWatts: batteryModel.maxAdapterWatts,
-                                    isForNotification: true
-                                )
-                            }
-                            .frame(width: 76, alignment: .trailing)
-                        }
-                        .frame(height: displayClosedNotchHeight, alignment: .center)
+                        closedBatteryPeekRow
                         } else if showsConnectionCard {
                             // 11-17：连接提示从 408 大卡改成 220 小条。
                             islandConnectionStrip
@@ -1348,22 +1384,7 @@ struct ContentView: View {
                         // win and reserve only 11pt, so the auto-peek showed
                         // an almost empty panel — the "tiny stuck glass" the
                         // user reported (docs/04 section I).
-                       else if showsNotificationCard {
-                           // A hardware notch needs the camera band reserved.
-                           // A floating island has no camera: keeping 29pt of
-                           // invisible band here is what made the card too
-                           // tall to shrink to the iPad/Mac proportions.
-                           Rectangle().fill(.clear).frame(
-                               width: vm.closedNotchSize.width - 20,
-                               height: usesFloatingIsland ? 0 : displayClosedNotchHeight
-                           )
-                       }
-                        // New case to enable compact notch on external displays
-                        else if !vm.hasNotch {
-                           Rectangle().fill(.clear).frame(width: vm.closedNotchSize.width - 20, height: 11) // idle notch height is halved on non notch display
-                       } else {
-                           Rectangle().fill(.clear).frame(width: vm.closedNotchSize.width - 20, height: displayClosedNotchHeight)
-                       }
+                       else { closedIdleCameraBand }
 
                         if coordinator.shouldShowSneakPeek(on: vm.screenUUID) {
                            if (coordinator.sneakPeekState(for: vm.screenUUID).type != .music) && (coordinator.sneakPeekState(for: vm.screenUUID).type != .battery) && !Defaults[.inlineOSD] && !usesFloatingIsland && vm.notchState == .closed {
@@ -2058,6 +2079,72 @@ struct ContentView: View {
     /// Space reserved for the title (left of the cutout) and artist (right).
     private let inlineMusicPeekLabelWidth: CGFloat = 110
 
+    // MARK: - 闭态占位（11-18 从 NotchLayout 分支链里抽出来的两块）
+    //
+    // 抽出来的理由不是好看：`NotchLayout()` 原来是一条 250 行的 if/else 链，
+    // 每加一个状态分支，Swift 类型检查器就要重新解一遍整条链，
+    // 「unable to type-check in reasonable time」已经在 body 里发生过两次
+    // （报错行还会随机漂移）。把能自包含的分支折成属性，链短了、将来加状态
+    // 不容易再撞阈值。
+    //
+    // 纪律：只抽「同一文件里的私有计算属性」，不新建文件、不改 pbxproj。
+    // （顺带记一笔：pbxproj 是 objectVersion 70 + fileSystemSynchronizedGroups，
+    // boringNotch/extensions/ 属于同步组，放进去的新 .swift 会自动编译、不用
+    // 改工程文件；但把视图搬到别的文件要把命中的 private 全改成 internal，
+    // 那是大改，见 docs/02。）
+
+    /// 内建屏闭态的电量行：左侧百分比、中间让开刘海的实心黑块、右侧电池。
+    /// 三段的宽高都是量出来的，不要拆开重排——中间那块黑块的宽度是
+    /// `closedNotchSize.width + 10`，少算 10pt 就会在刘海两侧留下缝。
+    private var closedBatteryPeekRow: some View {
+        HStack(spacing: 0) {
+            HStack {
+                Text(batteryModel.statusText)
+                    .font(.subheadline)
+                    .foregroundStyle(.white)
+            }
+
+            Rectangle()
+                .fill(.black)
+                .frame(width: vm.closedNotchSize.width + 10)
+
+            HStack {
+                BoringBatteryView(
+                    batteryWidth: 30,
+                    isCharging: batteryModel.isCharging,
+                    isInLowPowerMode: batteryModel.isInLowPowerMode,
+                    isPluggedIn: batteryModel.isPluggedIn,
+                    levelBattery: batteryModel.levelBattery,
+                    maxAdapterWatts: batteryModel.maxAdapterWatts,
+                    isForNotification: true
+                )
+            }
+            .frame(width: 76, alignment: .trailing)
+        }
+        .frame(height: displayClosedNotchHeight, alignment: .center)
+    }
+
+    /// 闭态「什么都不显示」时占位的那条不可见带子。
+    /// 三个分支原来散在 `NotchLayout()` 分支链的尾部：
+    /// - 有通知卡时：有刘海屏要预留摄像头带；浮岛没有摄像头，留 29pt 会让卡
+    ///   高不到 iPad/Mac 的比例，所以给 0；
+    /// - 无刘海屏：空闲态高度只有一半（11pt）；
+    /// - 有刘海屏：整条 `displayClosedNotchHeight`。
+    @ViewBuilder
+    private var closedIdleCameraBand: some View {
+        if showsNotificationCard {
+            Rectangle().fill(.clear).frame(
+                width: vm.closedNotchSize.width - 20,
+                height: usesFloatingIsland ? 0 : displayClosedNotchHeight
+            )
+        } else if !vm.hasNotch {
+            // idle notch height is halved on non notch display
+            Rectangle().fill(.clear).frame(width: vm.closedNotchSize.width - 20, height: 11)
+        } else {
+            Rectangle().fill(.clear).frame(width: vm.closedNotchSize.width - 20, height: displayClosedNotchHeight)
+        }
+    }
+
     @ViewBuilder
     func MusicLiveActivity() -> some View {
         HStack(spacing: 0) {
@@ -2232,11 +2319,10 @@ extension ContentView {
     // MARK: - Notification Peek
 
     /// How long a mirrored message stays on screen before the notch closes
-    /// again. Must match `SystemNotificationManager.displayDuration` or the
-    /// manager expires the card before this countdown gets to close the panel.
-    /// 12s gives the user time to actually read the full card; pointing at it
-    /// still freezes the countdown (`handleHover` → `holdActive`).
-    private var notificationPeekSeconds: TimeInterval { 12 }
+    /// again. 11-18：直接读管理器的常量，不再各写一个 12 靠注释同步。
+    private var notificationPeekSeconds: TimeInterval {
+        SystemNotificationManager.displayDuration
+    }
 
     /// Outer width of the notification card. The floating island takes the
     /// iPad/Mac card width; a hardware-notch display keeps the stock 520pt

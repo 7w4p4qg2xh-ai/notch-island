@@ -67,7 +67,6 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
 
 struct SettingsView: View {
     @State private var selectedTab: SettingsTab = .general
-    @State private var accentColorUpdateTrigger = UUID()
 
     let updaterController: SPUStandardUpdaterController?
     let camera: CameraModel
@@ -137,13 +136,18 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 700)
+        // 11-18：固定 width 700 时窗口能拖但内容不跟，体感上"不可缩放"。
+        // 改成 minWidth 让内容随窗口伸展（NavigationSplitView 自己会分配
+        // 侧栏/详情比例）；下限在 SettingsWindowController 里用
+        // contentMinSize 兜住，拖得太窄不会裁内容。
+        .frame(minWidth: 700)
         .background(Color(NSColor.windowBackgroundColor))
         .tint(.effectiveAccent)
-        .id(accentColorUpdateTrigger)
-        .onReceive(NotificationCenter.default.publisher(for: .accentColorChanged)) { _ in
-            accentColorUpdateTrigger = UUID()
-        }
+        // 11-18：去掉根部的 `.id(accentColorUpdateTrigger)`。改一次强调色
+        // 会让整棵设置树销毁重建——当前分区的滚动位置、展开态、滑杆拖拽中
+        // 的临时值全部复位，各分区的 onAppear / .task 还会重跑（通知页会就
+        // 此再查一次跨进程的授权）。强调色本身已通过 `.tint` 与
+        // `Color.effectiveAccent` 的 @Published 传播，不需要整树刷新。
     }
 
     private func tabItem(_ tab: SettingsTab) -> some View {

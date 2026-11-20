@@ -90,10 +90,34 @@ final class BoringViewModel: NSObject, ObservableObject {
             .store(in: &cancellables)
     }
 
+    /// 11-18：全屏隐藏（hideOnClosed）只该吞「自动出现的内容」——正在播放卡、
+    /// 歌词带，这些用户明确拍板过全屏看视频不要（11-08）。但音量/亮度 HUD、
+    /// 耳机连接卡、电量速览是用户操作或系统事件的**即时反馈**：岛藏了它们
+    /// 就消失，而 `osdReplacement` 又顶掉了系统原生 OSD，全屏下调音量/亮度
+    /// 会彻底没有反馈（用户 11-18 报告的 bug）。反馈活动期间暂停全屏隐藏，
+    /// HUD 到点自动回落。
+    ///
+    /// OSD 只认岛所在屏（`screenUUID`）的 state：音量无定向（广播所有屏）、
+    /// 亮度有菜单栏屏补发，岛屏必然置 show。`.music` 是歌曲切换 HUD，全屏
+    /// 看视频时不要它（11-08 用户决定），所以排除。
+    var isFeedbackForcingIsland: Bool {
+        guard hideOnClosed else { return false }
+        let osdActive: Bool = {
+            guard let uuid = screenUUID,
+                  let state = coordinator.sneakPeekStates[uuid] else { return false }
+            return state.show && state.type != .music
+        }()
+        let transientCard = coordinator.expandingView.show
+            && (coordinator.expandingView.type == .peripheralBattery
+                || coordinator.expandingView.type == .battery)
+        return osdActive || transientCard
+    }
+
     // Computed property for effective notch height
     var effectiveClosedNotchHeight: CGFloat {
         let currentScreen = screenUUID.flatMap { NSScreen.screen(withUUID: $0) }
-        let noNotchAndFullscreen = hideOnClosed && (currentScreen?.safeAreaInsets.top ?? 0 <= 0 || currentScreen == nil)
+        let noNotchAndFullscreen = hideOnClosed && !isFeedbackForcingIsland
+            && (currentScreen?.safeAreaInsets.top ?? 0 <= 0 || currentScreen == nil)
         return noNotchAndFullscreen ? 0 : closedNotchSize.height
     }
 

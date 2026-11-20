@@ -8,8 +8,6 @@
 	<true/>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Notch Island analyzes audio from your music app to draw a real-time waveform in the notch. Audio is processed locally and never leaves your Mac.</string>
-	<key>NSScreenCaptureUsageDescription</key>
-	<string>Notch Island samples the brightness of what is behind the island to adapt the Liquid Glass material (Apple's clear-glass rule). Only a tiny, downsampled image is read in memory; nothing is recorded, saved, or transmitted.</string>
 	<key>SUBundleName</key>
 	<string>Notch Island</string>
 	<key>SUEnableAutomaticChecks</key>

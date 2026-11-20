@@ -26,10 +26,12 @@ struct OSDSettings: View {
                 Defaults.Toggle(key: .osdReplacement) {
                     Text("Replace System OSD")
                 }
+                .help("Shows brightness and volume feedback inside the notch instead of the system on-screen display.")
                 if osdReplacementDefault {
                     Defaults.Toggle(key: .inlineOSD) {
                         Text("Use inline style")
                     }
+                    .help("Draws the HUD inside the notch plate rather than as a floating pill.")
                 }
             }
 
