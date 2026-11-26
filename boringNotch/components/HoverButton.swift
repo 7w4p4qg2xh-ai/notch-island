@@ -7,6 +7,26 @@
 
 import SwiftUI
 
+/// 按下反馈。HIG 第一条「按下即反馈，不等松手」：原实现只有 hover 变色，
+/// 鼠标按住到松手之间界面完全不动。SwiftUI 的 `PlainButtonStyle` 拿不到
+/// `isPressed`，所以用一个最小 ButtonStyle 把它接出来。
+/// 参数按 2026-11-24 审查结论：缩放到 0.96（不是 0.9），临界阻尼不弹跳，
+/// 按下 0.22s 响应、松开 0.22s 淡出。
+private struct HoverIconButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                Capsule()
+                    .fill(Color.gray.opacity(configuration.isPressed ? 0.28 : 0))
+            )
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .animation(
+                configuration.isPressed ? StandardAnimations.press : StandardAnimations.fade,
+                value: configuration.isPressed
+            )
+    }
+}
+
 struct HoverButton: View {
     var icon: String
     var iconColor: Color = .primary
@@ -36,9 +56,9 @@ struct HoverButton: View {
                         }
                 }
         }
-        .buttonStyle(PlainButtonStyle())
+        .buttonStyle(HoverIconButtonStyle())
         .onHover { hovering in
-            withAnimation(.smooth(duration: 0.3)) {
+            withAnimation(StandardAnimations.fade) {
                 isHovering = hovering
             }
         }

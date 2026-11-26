@@ -206,20 +206,26 @@ struct ContentView: View {
     /// `displayClosedNotchHeight` 消费点——非连接时本 gate 恒 false，内建屏
     /// 外观逐字不变。8s 倒计时由 `expandingView.didSet` 统一管，这里不新增。
     private var showsNotchConnectionCard: Bool {
-        vm.hasNotch
-            && !usesFloatingIsland
-            && vm.notchState == .closed
-            // 11-18：与 showsConnectionCard 同理，插耳机反馈不被全屏隐藏吞掉。
-            && (!vm.hideOnClosed || vm.isFeedbackForcingIsland)
-            && (
-                (coordinator.expandingView.show
-                    && coordinator.expandingView.type == .peripheralBattery
-                    && Defaults[.peripheralBatteryEnabled])
-                || Self.bnFakePeripheralPeek  // 不碰真耳机也能验证新卡布局
-            )
+        // 🔴 11-21 用户选 C（「不弹岛卡」）：耳机一连上，macOS 自己会在右上角
+        // 弹一张「已连接」通知（带电量环），我们再在刘海下面弹一条 220×34，
+        // 同一件事说两遍。内建屏从此**不弹条**，只让刘海两侧那行内嵌文字
+        // 说话（`notchPeripheralPeek`：左「设备名」、右「机型图标 + 电量」）。
+        // 判断条件原本是 hasNotch / closed / expandingView==peripheralBattery，
+        // 现在恒 false，overlay 与门控代码原样保留 —— 回滚只要把这里改回去。
+        //
+        // ⚠️ 浮岛（外接无刘海屏）的 `showsConnectionCard` 一行不动：那条小条
+        // 画在岛自己的收起胶囊里，不是屏幕下方的额外浮层。
+        false
     }
 
-    private var notchPeripheralSideWidth: CGFloat { 82 }
+    /// 11-21：跟 OSD 对齐 —— 左右各 100pt（原 82）。
+    /// 🔴 11-24：中间留黑从 `closedNotchSize.width - 20` 改成 `+ 8`。
+    /// 实测硬件刘海 189pt（由 screen 的 auxiliary padding 算出），-20
+    /// 只有 169pt，左右各短 10pt：左边文字右端、右边电量条左端
+    /// （maxWidth:.infinity 必顶到段边缘）正好压在物理刘海上被吞
+    /// （用户 11-24 截图）。+8 = 留黑每边比刘海多 4pt，两侧内容完整
+    /// 落在刘海外。⚠️ OSD 那条仍是 -20（无反馈，本次只动速览）。
+    private var notchPeripheralSideWidth: CGFloat { 100 }
 
     /// 速览条的内容宽度（不含闭态左右内边距 —— 这个状态把它们置 0）。
     private var notchPeripheralPillWidth: CGFloat {
@@ -229,10 +235,18 @@ struct ContentView: View {
     /// 左耳/右耳优先，单值设备退回主电量。
     private func notchPeripheralLeftText(_ device: PeripheralDeviceBattery?) -> String {
         guard let device else { return String(localized: "已连接") }
+        // 11-21：内嵌行取代了连接卡之后，「已转移到其它设备 / 电量偏低」这类
+        // 状态没有地方显示了 —— 状态不是普通的「已连接」时优先说状态，
+        // 否则对着已经交给 iPhone 的耳机还写着名字和电量就是撒谎。
+        if let status = peripheralBatteryModel.islandStatusMessage, status != "已连接" {
+            return status
+        }
         var parts: [String] = []
         if let left = device.left { parts.append("L \(left)") }
         if let right = device.right { parts.append("R \(right)") }
-        if parts.isEmpty, let main = device.main { parts.append("\(main)%") }
+        // 11-21：只有一个总电量的设备（AirPods Max / 单值耳机）左边放**名字**，
+        // 电量挪到右侧图标旁 —— 否则左边只有「34%」，看不出是哪台连上了。
+        if parts.isEmpty, device.main != nil { return device.name }
         return parts.isEmpty ? device.name : parts.joined(separator: " · ")
     }
 
@@ -1603,7 +1617,7 @@ struct ContentView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(islandNowPlayingLabel)
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -1653,7 +1667,7 @@ struct ContentView: View {
             )
             TimelineView(.animation(minimumInterval: 0.25)) { timeline in
                 Text(notchStripText(at: islandElapsed(at: timeline.date)))
-                    .font(.system(size: 12.5, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.white.opacity(0.96))
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -1939,42 +1953,68 @@ struct ContentView: View {
         .frame(width: islandCardWidth, alignment: .leading)
     }
 
-    /// 内建刘海屏的窄速览条：左边左右耳电量，右边机型图标 + 盒子电量。
-    /// 宽度固定 = 刘海 + 2×82，所以它只是「刘海胖了一点点」，不会横穿菜单栏。
+    /// 内建刘海屏的耳机/外设速览 —— 版式照抄「调音量」那条 OSD：
+    /// 左「机型图标 + 名字」，中间摄像头留黑，右「电量条 + 百分比」。
+    /// 11-21 用户：「做成调音量这样的窗口」。
+    ///
+    /// 三段几何：左右各 100pt、中间留黑 `closedNotchSize.width + 8`
+    /// （11-24 从 -20 改来：留黑必须盖满 189pt 硬件刘海，两侧内容才不会
+    /// 进刘海被吞；OSD 那条仍是 -20，两条不再严格等宽，但谁也不会被吞）。
+    /// 电量条是**静态**的（不接 `DraggableProgressBar`：电量不能拖）。
     @ViewBuilder
     private var notchPeripheralPeek: some View {
         let device = peripheralBatteryModel.peekDevice
             ?? (Self.bnFakePeripheralPeek ? Self.bnFakePeripheralDevice : nil)
+        let level = device?.overallLevel
         HStack(spacing: 0) {
-            Text(notchPeripheralLeftText(device))
-                .font(.system(size: 11.5, weight: .medium))
-                .foregroundStyle(.white)
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .padding(.leading, 10)
-                .frame(width: notchPeripheralSideWidth, alignment: .leading)
-
-            // 摄像头正下方必须留黑：文字跑进硬件刘海底下就看不见了。
-            Rectangle()
-                .fill(.black)
-                .frame(width: vm.closedNotchSize.width + 8)
-
             HStack(spacing: 5) {
                 // 11-16：机型图标（airpods / airpodspro / airpodsmax / beats…），
                 // 不再一律用 headphones。
                 Image(systemName: device?.icon ?? peripheralBatteryModel.peekIcon)
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(.white)
-                if let caseLevel = device?.caseLevel {
-                    Text("\(caseLevel)%")
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.72))
+                Text(notchPeripheralLeftText(device))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .allowsTightening(true)
+            }
+            .padding(.leading, 10)
+            .frame(width: notchPeripheralSideWidth, height: displayClosedNotchHeight, alignment: .leading)
+
+            // 摄像头正下方必须留黑：文字跑进硬件刘海底下就看不见了。
+            // 🔴 11-24：宽度必须 ≥ 硬件刘海（实测 189pt）而不是 -20，
+            // 否则左右两段各有 10pt 压在刘海边缘被吞掉。
+            Rectangle()
+                .fill(.black)
+                .frame(width: vm.closedNotchSize.width + 8)
+
+            HStack(spacing: 6) {
+                if let level {
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(.white.opacity(0.22))
+                            Capsule()
+                                .fill(.white)
+                                .frame(width: geo.size.width * CGFloat(min(max(level, 0), 100)) / 100)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 6)
+
+                    Text("\(level)%")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white)
                         .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize()
                 }
             }
             .padding(.trailing, 10)
-            .frame(width: notchPeripheralSideWidth, alignment: .trailing)
+            .frame(width: notchPeripheralSideWidth, height: displayClosedNotchHeight, alignment: .trailing)
         }
         .frame(height: displayClosedNotchHeight, alignment: .center)
         // 自己把底涂黑。外壳那一层 `NotchSurfaceBackground` 在闭态下
@@ -1993,6 +2033,7 @@ struct ContentView: View {
                     .onAppear {
                         bnDebugLog("perippeek icon=\(device?.icon ?? peripheralBatteryModel.peekIcon)"
                                    + " left=\"\(notchPeripheralLeftText(device))\""
+                                   + " level=\(level.map(String.init) ?? "-")"
                                    + " pill=\(notchPeripheralPillWidth) chin=\(computedChinWidth)"
                                    + " frame=\(proxy.frame(in: .global))")
                     }
@@ -2012,7 +2053,7 @@ struct ContentView: View {
                         .frame(width: 18, height: 18)
                         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                     Text(islandNowPlayingLabel)
-                        .font(.system(size: 12.5, weight: .medium))
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -2038,7 +2079,7 @@ struct ContentView: View {
                         size: 18
                     )
                     Text(islandNotificationLabel(notification))
-                        .font(.system(size: 12.5, weight: .medium))
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -2433,9 +2474,39 @@ extension ContentView {
         }
     }
 
+    /// 鼠标是否停在「菜单栏图标带」的右侧：那块区域落在浮岛窗口（640×210）之内，
+    /// 但视觉上属于系统菜单栏，不该由浮岛接管。判据只有两条：在菜单栏高度内（顶部
+    /// 33pt 左右），且横向在胶囊右边缘之外。
+    private func isPointerInMenuBarIconZone() -> Bool {
+        let pointer = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: {
+            NSMouseInRect(pointer, $0.frame, false)
+        }) else { return false }
+        let menuBarHeight = screen.frame.maxY - screen.visibleFrame.maxY
+        guard menuBarHeight > 0, pointer.y >= screen.frame.maxY - menuBarHeight else {
+            return false
+        }
+        // 收起态胶囊居中、宽度远小于 220；midX + 110 只切到胶囊右侧的空白带，
+        // 不会把「鼠标移到胶囊上就展开」这条常用路径关掉。
+        return pointer.x > screen.frame.midX + 110
+    }
+
     private func handleHover(_ hovering: Bool) {
         if coordinator.firstLaunch { return }
         hoverTask?.cancel()
+
+        // 🔴 2026-11-22：菜单栏右侧图标保护区。
+        //
+        // 窗口 frame 恒定 640×210（收起/展开都一样），而展开态的命中形状是
+        // `Rectangle()`（见 `islandHitShape`）——鼠标只要落进这块矩形就会展开，
+        // 展开后整块矩形接管点击。实测后果：鼠标移向顶部中间的第三方状态项
+        // （Stats ×2、MenuBarAgent ×2，横坐标 906~1082）时岛先展开、点击被卡片
+        // 吃掉，那几个图标就"点不动"；把鼠标先移开让岛收起再点才有效。
+        //
+        // 这里只在「触发展开」这一侧让路：鼠标停在菜单栏高度、且位于胶囊右边缘
+        // 之外时，不主动展开，保持收起态让点击穿透（收起态命中形状是胶囊本身）。
+        // 展开态不受影响 —— 卡片已经开着的交互、拖动、点击全部照旧。
+        if hovering, isPointerInMenuBarIconZone() { return }
 
         if hovering {
             withAnimation(animationSpring) {
@@ -2600,7 +2671,7 @@ extension ContentView {
     }
 
     private func triggerHorizontalMediaFeedback(_ feedback: CGFloat) {
-        withAnimation(.interactiveSpring(response: 0.18, dampingFraction: 0.62)) {
+        withAnimation(StandardAnimations.feedback) {
             horizontalMediaGestureFeedback = feedback
             if vm.notchState == .closed {
                 gestureProgress = 2

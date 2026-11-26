@@ -51,7 +51,8 @@ final class YouTubeMusicController: MediaControllerProtocol {
     private var webSocketClient: YouTubeMusicWebSocketClient?
 
     private var updateTimer: Timer?
-    private var appStateObserver: Task<Void, Never>?
+    /// App launch/terminate observers; removed when this controller deallocates.
+    private let workspaceObservers = WorkspaceNotificationObservers()
     private var reconnectTask: Task<Void, Never>?
     private var reconnectDelay: TimeInterval = 1.0
 
@@ -71,7 +72,6 @@ final class YouTubeMusicController: MediaControllerProtocol {
     deinit {
         artworkFetchTask?.cancel()
         reconnectTask?.cancel()
-        appStateObserver?.cancel()
         updateTimer?.invalidate()
 
         if let webSocketClient {
@@ -157,35 +157,34 @@ final class YouTubeMusicController: MediaControllerProtocol {
     }
 
     // MARK: - Private Methods
+
+    /// Block-based NSWorkspace observers instead of `Task` + `withTaskGroup`
+    /// over `notifications(named:)`: those child tasks wait on an async
+    /// sequence that does not end when the parent task is cancelled, so a new
+    /// controller per media-source switch left a set of live subscriptions
+    /// (and their parent task) behind. Tokens are removed in `deinit`.
     private func setupAppStateObserver() {
-        appStateObserver = Task { [weak self] in
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask {
-                    let launchNotifications = NSWorkspace.shared.notificationCenter.notifications(
-                        named: NSWorkspace.didLaunchApplicationNotification
-                    )
+        workspaceObservers.add(forName: NSWorkspace.didLaunchApplicationNotification) { [weak self] notification in
+            let bundleID = Self.bundleIdentifier(of: notification)
+            Task { @MainActor [weak self] in
+                await self?.handleAppLaunched(bundleID: bundleID)
+            }
+        }
 
-                    for await notification in launchNotifications {
-                        await self?.handleAppLaunched(notification)
-                    }
-                }
-
-                group.addTask {
-                    let terminateNotifications = NSWorkspace.shared.notificationCenter.notifications(
-                        named: NSWorkspace.didTerminateApplicationNotification
-                    )
-
-                    for await notification in terminateNotifications {
-                        await self?.handleAppTerminated(notification)
-                    }
-                }
+        workspaceObservers.add(forName: NSWorkspace.didTerminateApplicationNotification) { [weak self] notification in
+            let bundleID = Self.bundleIdentifier(of: notification)
+            Task { @MainActor [weak self] in
+                await self?.handleAppTerminated(bundleID: bundleID)
             }
         }
     }
 
-    private func handleAppLaunched(_ notification: Notification) async {
-        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              app.bundleIdentifier == configuration.bundleIdentifier else {
+    private nonisolated static func bundleIdentifier(of notification: Notification) -> String? {
+        (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
+    }
+
+    private func handleAppLaunched(bundleID: String?) async {
+        guard bundleID == configuration.bundleIdentifier else {
             return
         }
 
@@ -193,9 +192,8 @@ final class YouTubeMusicController: MediaControllerProtocol {
         await initializeIfAppActive()
     }
 
-    private func handleAppTerminated(_ notification: Notification) async {
-        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              app.bundleIdentifier == configuration.bundleIdentifier else {
+    private func handleAppTerminated(bundleID: String?) async {
+        guard bundleID == configuration.bundleIdentifier else {
             return
         }
 
@@ -203,8 +201,8 @@ final class YouTubeMusicController: MediaControllerProtocol {
 
         Task { @MainActor in
             stopPeriodicUpdates()
-            // NOTE: Do NOT cancel appStateObserver here.
-            // It must stay alive to detect when the app launches again.
+            // NOTE: Do NOT remove the app-state observers here.
+            // They must stay alive to detect when the app launches again.
         }
 
         cancelReconnect(resetDelay: true)
@@ -547,5 +545,28 @@ final class YouTubeMusicController: MediaControllerProtocol {
             default: break
         }
         if let target, target != playbackState.repeatMode { playbackState.repeatMode = target }
+    }
+}
+
+/// Owns a set of block-based notification observers and unregisters them when
+/// it goes away.
+///
+/// The controller's `deinit` is nonisolated, and touching an `NSObjectProtocol`
+/// token from there trips a concurrency warning; keeping the tokens in this box
+/// makes the observer lifetime follow the controller without touching `deinit`.
+private final class WorkspaceNotificationObservers: @unchecked Sendable {
+    private let center: NotificationCenter
+    private var tokens: [NSObjectProtocol] = []
+
+    init(center: NotificationCenter = NSWorkspace.shared.notificationCenter) {
+        self.center = center
+    }
+
+    func add(forName name: Notification.Name, handler: @escaping @Sendable (Notification) -> Void) {
+        tokens.append(center.addObserver(forName: name, object: nil, queue: .main, using: handler))
+    }
+
+    deinit {
+        for token in tokens { center.removeObserver(token) }
     }
 }

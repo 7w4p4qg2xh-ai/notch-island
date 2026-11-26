@@ -587,6 +587,23 @@ extension XPCHelperClient {
         }
     }
 
+    /// Siri 面板开着时让 helper 暂停停泊 —— 面板 origin 算在通知中心宿主窗口上，
+    /// 宿主被停泊到屏外 Siri 就永远没有可见窗口（2026-11-22 实测）。
+    /// 返回传输层是否成功：调用方（Siri 护栏）据此决定是否翻转 `siriYieldSent`，
+    /// 失败时保持旧值、下一个 0.3s tick 自动重试（docs/10 缺口 1 的回滚侧）。
+    /// 协议本身无 reply —— 传输成功即视为送达；helper 崩溃重启的失同步由
+    /// 护栏的周期对账兜底，不为此改 XPC 协议。
+    nonisolated func setSiriYield(_ yielding: Bool) async -> Bool {
+        let service = await MainActor.run { ensureRemoteService() }
+        do {
+            try await service.withService { $0.setSiriYield(yielding) }
+            return true
+        } catch {
+            await MainActor.run { self.lastError = .transport(underlying: error) }
+            return false
+        }
+    }
+
     nonisolated func stopNotificationWatching() {
         Task {
             await MainActor.run { self.wantsNotificationWatching = false }

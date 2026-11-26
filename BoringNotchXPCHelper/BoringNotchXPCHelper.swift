@@ -212,6 +212,15 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         }
     }
 
+    /// Siri 面板开着时不给宿主窗口停泊 —— 面板的位置算在宿主 origin 上，
+    /// 宿主飞出屏幕 Siri 就没有可见窗口了。检测在 app 侧做（helper 沙盒里
+    /// `CGWindowListCopyWindowInfo` 返回 nil）。
+    @objc func setSiriYield(_ yielding: Bool) {
+        DispatchQueue.main.async {
+            Self.watcher.setSiriYield(yielding)
+        }
+    }
+
     /// Put a mirrored banner back on screen, e.g. when the user asks for the
     /// real one because the notch cannot finish the interaction.
     @objc func revealNotification(_ token: String, with reply: @escaping (Bool) -> Void) {
@@ -665,8 +674,13 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
                 return
             }
 
-            let listenerProxy = connection.remoteObjectProxyWithErrorHandler { _ in
-                self.stopLunarEventStream()
+            // Weak capture: the proxy is stored in `self.lunarListener` and
+            // retains its error handler, so a strong `self` here is a
+            // self -> proxy -> block -> self cycle that keeps this helper
+            // alive forever and skips `deinit` (Lunar child process and pipe
+            // handler leak after the client disconnects).
+            let listenerProxy = connection.remoteObjectProxyWithErrorHandler { [weak self] _ in
+                self?.stopLunarEventStream()
             } as? BoringNotchXPCHelperLunarListener
 
             guard let listenerProxy else {

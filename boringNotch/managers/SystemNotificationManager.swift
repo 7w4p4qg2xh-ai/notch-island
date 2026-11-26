@@ -490,6 +490,59 @@ final class SystemNotificationManager: ObservableObject {
 
     private var watchdogTask: Task<Void, Never>?
     private var onScreenStreak = 0
+    private var siriGuardTask: Task<Void, Never>?
+    private var siriYieldSent = false
+
+    /// Siri 面板（`com.apple.SiriNCService`，layer 23）是否开着 —— 检测放在
+    /// app 侧是硬约束：helper 是沙盒进程，`CGWindowListCopyWindowInfo` 返回 nil。
+    ///
+    /// 🔴 面板 origin 是「通知中心宿主窗口 origin + (1135,28)」：宿主被停泊到
+    /// (-10000,-10000) 时面板落在 (-8865,-9972)，点菜单栏 Siri 图标什么都看不到。
+    /// 只认 layer 23 —— Siri 主进程另有一个 844×577 常驻窗口（alpha 0，没打开
+    /// 时也在），拿它当信号会永久让路、通知接管静默失效。
+    private static func siriPanelIsOpen() -> Bool {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return false }
+        for w in list {
+            guard let layer = w[kCGWindowLayer as String] as? Int, layer == 23 else { continue }
+            if ((w[kCGWindowOwnerName as String] as? String) ?? "") == "SiriNCService" { return true }
+            guard let pid = w[kCGWindowOwnerPID as String] as? Int,
+                  NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier
+                    == "com.apple.SiriNCService" else { continue }
+            return true
+        }
+        return false
+    }
+
+    /// 0.3s 一次的 Siri 护栏：面板开/关的瞬间把 helper 的停泊状态翻过来。
+    /// 只回报边沿（`siriYieldSent`）；通知接管关掉时整段跳过，
+    /// 因为那时根本没有窗口被停泊。
+    ///
+    /// 🔴 同步纪律（docs/10 缺口 1，2026-11-22）：
+    /// - `siriYieldSent` 只在 XPC 传输成功后才翻转。失败保持旧值，边沿条件
+    ///   下个 tick 仍成立、自动重试 —— 修复「XPC 丢了但 app 以为已让路」。
+    /// - 每 ~2s 强制重发一次当前状态。helper 侧幂等（`yieldToSiri` /
+    ///   `resumeAfterSiri` 各有 guard），重复发送无害；这覆盖 helper 崩溃
+    ///   重启 / 睡眠唤醒重建后 `siriYielded=false` 而 app 仍记得 true 的
+    ///   失同步场景 —— 那种情况下边沿判定永远不成立，必须靠对账。
+    func startSiriGuard() {
+        guard siriGuardTask == nil else { return }
+        siriGuardTask = Task { [weak self] in
+            var ticks = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(0.3))
+                guard !Task.isCancelled, let self else { return }
+                guard Defaults[.notificationLiveActivity] else { continue }
+                ticks += 1
+                let open = Self.siriPanelIsOpen()
+                if open != self.siriYieldSent || ticks % 7 == 0 {
+                    let delivered = await XPCHelperClient.shared.setSiriYield(open)
+                    if delivered { self.siriYieldSent = open }
+                }
+            }
+        }
+    }
 
     /// The helper can lose its AX attachment in ways none of its internal
     /// timers reliably catch: a transient trust blip makes the health check
@@ -501,6 +554,7 @@ final class SystemNotificationManager: ObservableObject {
     /// Two consecutive sightings (~20s) avoid re-arming during the brief
     /// window while a fresh NotificationCenter is still coming up.
     func startBannerWatchdog() {
+        startSiriGuard()
         guard watchdogTask == nil else { return }
         watchdogTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -531,6 +585,12 @@ final class SystemNotificationManager: ObservableObject {
         guard let list = CGWindowListCopyWindowInfo(
             [.excludeDesktopElements], kCGNullWindowID
         ) as? [[String: Any]] else { return false }
+        // 🔴 Siri 打开了就跳过：Siri 面板（com.apple.SiriNCService）的 origin 是
+        // 「宿主 origin + 固定偏移」，所以面板开着时宿主**必须**在屏上，helper 会
+        // 主动让路（`startSiriGuard()` → XPC `setSiriYield`）。把这种情况当成
+        // 「系统横幅抢回了屏幕」会让 watchdog 每 20s 重建一次 watcher，把宿主重新
+        // 停泊回屏外 —— Siri 面板立刻又飞出去。见 docs/04 V。
+        if siriPanelIsOpen() { return false }
         for w in list {
             // 🔴 Layer ceiling. Window Server also paints full-screen
             // "Packages Display N Shield" windows at layer 2147483646 with

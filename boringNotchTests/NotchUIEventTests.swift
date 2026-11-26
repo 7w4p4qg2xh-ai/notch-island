@@ -16,6 +16,12 @@ final class NotchUIEventTests: XCTestCase {
 
     private var cancellables: Set<AnyCancellable> = []
 
+    /// Private pipe: this target runs inside the host app (`TEST_HOST`), whose
+    /// managers publish on `NotchUIEventBus.shared` (host events would trip the
+    /// "unexpected event" assertions) and whose coordinator consumes whatever
+    /// is sent (test events would drive the real UI).
+    private let bus = NotchUIEventBus()
+
     override func tearDown() {
         cancellables.removeAll()
         super.tearDown()
@@ -25,7 +31,7 @@ final class NotchUIEventTests: XCTestCase {
     /// direct manager->coordinator calls. This is the contract.
     func testSneakPeekEventDeliversPayload() {
         let expectation = expectation(description: "event delivered")
-        NotchUIEventBus.events
+        bus.events
             .sink { event in
                 guard case .sneakPeek(let type, let value, let icon, _, let uuid, _) = event else {
                     XCTFail("unexpected event")
@@ -39,13 +45,13 @@ final class NotchUIEventTests: XCTestCase {
             }
             .store(in: &cancellables)
 
-        NotchUIEventBus.events.send(.sneakPeek(type: .volume, value: 0.5, icon: "speaker.wave.2"))
+        bus.events.send(.sneakPeek(type: .volume, value: 0.5, icon: "speaker.wave.2"))
         waitForExpectations(timeout: 1.0)
     }
 
     func testExpandingViewEventDeliversType() {
         let expectation = expectation(description: "expanding event delivered")
-        NotchUIEventBus.events
+        bus.events
             .sink { event in
                 guard case .expandingView(let type) = event else {
                     XCTFail("unexpected event")
@@ -56,7 +62,7 @@ final class NotchUIEventTests: XCTestCase {
             }
             .store(in: &cancellables)
 
-        NotchUIEventBus.events.send(.expandingView(type: .battery))
+        bus.events.send(.expandingView(type: .battery))
         waitForExpectations(timeout: 1.0)
     }
 }

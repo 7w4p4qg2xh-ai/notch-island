@@ -17,7 +17,9 @@ struct OSDIconView: View {
     var body: some View {
         switch eventType {
         case .volume:
-            Image(systemName: icon.isEmpty ? AudioOutputRouteResolver.shared.volumeSymbol(for: value) : icon)
+            // 显式 icon 优先；否则按当前输出机型选图标（AirPods / 头戴 / 扬声器）。
+            // MainActor（SwiftUI body）下调用，才能读 @MainActor 的外设管理器。
+            Image(systemName: icon.isEmpty ? AudioOutputRouteResolver.shared.volumeSymbolForCurrentOutput(value: value) : icon)
                 .contentTransition(.interpolate)
                 .opacity(value.isZero ? 0.6 : 1)
                 .scaleEffect(value.isZero ? 0.85 : 1)

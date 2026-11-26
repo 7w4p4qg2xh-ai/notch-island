@@ -309,13 +309,26 @@ private class SharingServiceDelegate: NSObject {}
             } else {
                 if let tempTextURL = await TemporaryFileStorageService.shared.createTempFile(for: .text(text)) {
                     await shareFilesOrText([tempTextURL], using: shareProvider, from: view)
-                    TemporaryFileStorageService.shared.removeTemporaryFileIfNeeded(at: tempTextURL)
+                    scheduleTemporaryFileCleanup(tempTextURL)
                 } else {
                     await shareFilesOrText([text], using: shareProvider, from: view)
                 }
             }
         } else if !itemsToShare.isEmpty {
             await shareFilesOrText(itemsToShare, using: shareProvider, from: view)
+        }
+    }
+
+    /// `shareFilesOrText` only *starts* a share: `NSSharingService.perform` and
+    /// `NSSharingServicePicker.show` return immediately, and the receiver reads
+    /// the file afterwards. Deleting the temp copy on return truncated the
+    /// share to an empty file; `SharingLifecycleDelegate.onEnd` is no better
+    /// (it can fire from a 2 s timeout, while AirDrop keeps reading until the
+    /// other device accepts). A fixed grace period outlives every path.
+    private func scheduleTemporaryFileCleanup(_ url: URL) {
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(for: .seconds(300))
+            TemporaryFileStorageService.shared.removeTemporaryFileIfNeeded(at: url)
         }
     }
 

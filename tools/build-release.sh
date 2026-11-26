@@ -49,6 +49,7 @@ xcodebuild \
     -target boringNotch \
     -configuration Release \
     SYMROOT="$WS/build/Products" \
+    -clonedSourcePackagesDirPath "$WS/build/SourcePackagesLocal" \
     CODE_SIGN_IDENTITY=- \
     CODE_SIGNING_REQUIRED=YES \
     CODE_SIGNING_ALLOWED=YES \

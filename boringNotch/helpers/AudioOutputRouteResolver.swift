@@ -42,6 +42,32 @@ final class AudioOutputRouteResolver {
         }
     }
 
+    /// 当前默认输出是不是耳机类（AirPods / 头戴 / 有线耳机）。
+    /// 音量 HUD 用它决定是否按蓝牙 Product ID 细分机型图标：
+    /// 只有输出确实落在耳机上时才细分，扬声器场景必须保持扬声器图标，
+    /// 不能因为「连着耳机但没在用」就误显示耳机。
+    var currentRouteIsHeadphones: Bool {
+        switch stateQueue.sync { cachedRouteKind } {
+        case .airPods, .airPodsPro, .airPodsMax, .wiredHeadphones, .bluetoothHeadphones:
+            return true
+        case .builtInSpeaker, .externalSpeaker, .unknown:
+            return false
+        }
+    }
+
+    /// 音量 HUD 图标（须在 MainActor 调用）：输出落在耳机上时，改用蓝牙
+    /// Product ID 识别的具体机型图标。用户的 AirPods 改过名（AP5），
+    /// CoreAudio 设备名认不出机型，只有 PeripheralBatteryManager 的
+    /// Product ID 表可靠。没有耳机数据 / 输出是扬声器时回落到原逻辑。
+    @MainActor
+    func volumeSymbolForCurrentOutput(value: CGFloat) -> String {
+        let base = volumeSymbol(for: value)
+        guard currentRouteIsHeadphones,
+              let headphoneIcon = PeripheralBatteryManager.shared.currentHeadphoneIcon()
+        else { return base }
+        return headphoneIcon
+    }
+
     /// 11-17: current default output device name. Used by the headphone
     /// connection detector to recognise a route switch to an ALREADY-known
     /// device (e.g. app relaunched with AP5 in its baseline, then the user

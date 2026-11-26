@@ -37,6 +37,9 @@ final class SpotifyController: MediaControllerProtocol {
 
     private var lastArtworkURL: String?
     private var artworkFetchTask: Task<Void, Never>?
+    /// Bumped on every artwork request so a slow download cannot write back
+    /// over a state that a newer PlaybackStateChanged already replaced.
+    private var artworkRequestGeneration = 0
 
     init() {
         setupPlaybackStateChangeObserver()
@@ -134,23 +137,28 @@ final class SpotifyController: MediaControllerProtocol {
             guard artworkURL != lastArtworkURL || state.artwork == nil else { return }
             artworkFetchTask?.cancel()
 
-            let currentState = state
+            artworkRequestGeneration &+= 1
+            let generation = artworkRequestGeneration
 
             artworkFetchTask = Task {
                 do {
                     let data = try await ImageService.shared.fetchImageData(from: url)
 
                     await MainActor.run { [weak self] in
-                        guard let self = self else { return }
-                        var updatedState = currentState
-                        updatedState.artwork = data
-                        self.playbackState = updatedState
+                        guard let self = self, self.artworkRequestGeneration == generation else { return }
+                        // Patch only `artwork`. The snapshot taken before the
+                        // download is already stale (Spotify pushes a
+                        // PlaybackStateChanged on every progress/volume/seek
+                        // tick), so writing it back whole rolled
+                        // currentTime / isPlaying / volume backwards.
+                        self.playbackState.artwork = data
                         self.lastArtworkURL = artworkURL
                         self.artworkFetchTask = nil
                     }
                 } catch {
                     await MainActor.run { [weak self] in
-                        self?.artworkFetchTask = nil
+                        guard let self = self, self.artworkRequestGeneration == generation else { return }
+                        self.artworkFetchTask = nil
                     }
                 }
             }

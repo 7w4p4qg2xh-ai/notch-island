@@ -31,6 +31,19 @@ enum NotchUIEvent {
 }
 
 /// The event pipe. `BoringViewCoordinator` is the intended subscriber.
-enum NotchUIEventBus {
-    static let events = PassthroughSubject<NotchUIEvent, Never>()
+///
+/// An object holding the subject (instead of a bare global `PassthroughSubject`)
+/// so tests can exercise the same publish/subscribe seam on a private pipe: the
+/// test target runs inside the host app via `TEST_HOST`, whose managers publish
+/// volume/battery/music events on the shared pipe and whose coordinator
+/// consumes everything sent to it.
+final class NotchUIEventBus: @unchecked Sendable {
+    static let shared = NotchUIEventBus()
+
+    let events = PassthroughSubject<NotchUIEvent, Never>()
+
+    init() {}
+
+    /// App-wide pipe: managers publish, the coordinator subscribes.
+    static var events: PassthroughSubject<NotchUIEvent, Never> { shared.events }
 }

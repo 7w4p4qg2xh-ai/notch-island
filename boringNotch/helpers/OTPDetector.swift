@@ -104,7 +104,11 @@ enum OTPDetector {
         if let after, after == "." {
             // "500.00" — a decimal amount, not a code with a trailing period.
             let next = ns.substring(with: NSRange(location: range.location + range.length, length: min(3, ns.length - range.location - range.length)))
-            if next.dropFirst().allSatisfy(\.isNumber) { return true }
+            // Requires at least one digit after the period: an empty
+            // `allSatisfy` is vacuously true, which used to reject a code at
+            // the very end of a sentence ("Your code is 4821.").
+            let fraction = next.dropFirst()
+            if !fraction.isEmpty, fraction.allSatisfy(\.isNumber) { return true }
         }
         return false
     }
@@ -146,7 +150,8 @@ extension OTPDetector {
             ("<#> Your ABC App code is 384950 #hash", "384950"),
             ("Your OTP for a transaction of INR 500.00 is 837201. Valid for 5 mins.", "837201"),
             ("Your Amazon OTP is: 4821", "4821"),
-            ("Your Steam Guard verification code: R7K9P2", "R7K9P2")
+            ("Your Steam Guard verification code: R7K9P2", "R7K9P2"),
+            ("Your code is 4821.", "4821")
         ]
 
         let shouldMiss: [String] = [

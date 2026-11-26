@@ -140,10 +140,23 @@ final class BrightnessManager: ObservableObject {
 				}
 
 				guard let current else {
-					// Helper could not report a value (DDC glitch). Keep the
-					// optimistic figure on screen rather than blanking the HUD,
-					// then resync from the hardware.
-					refresh()
+					// Helper could not report a value (DDC glitch). The
+					// optimistic figure on screen is a guess — resync from the
+					// hardware right away and correct the HUD with the real
+					// value when the read lands (docs/10 缺口 3，2026-11-22).
+					// If even the read fails, keep the estimate: blanking the
+					// OSD mid-press loses the only feedback the key has.
+					// 注：外接屏走这条 legacy 读路径多半拿不到值（DisplayServices
+					// 对第三方屏返回 nil），此时与旧行为一致、保留乐观值。
+					if let real = await client.currentScreenBrightness() {
+						optimisticValue = real
+						publish(brightness: real, touchDate: true)
+						NotchUIEventBus.events.send(
+							.sneakPeek(type: .brightness, value: CGFloat(real), targetScreenUUID: targetUUID)
+						)
+					} else {
+						refresh()
+					}
 					continue
 				}
 				// Repeats may have arrived during the write; show them too so the
@@ -215,6 +228,14 @@ final class KeyboardBacklightManager: ObservableObject {
 	}
 
 	@MainActor func setRelative(delta: Float) {
+		// The key is already swallowed by the time we get here, so silence is
+		// not an option: publish an optimistic HUD first (same contract as the
+		// screen-brightness path), then let the authoritative value correct it.
+		// The failure branches below used to return with zero feedback
+		// (docs/10 缺口 2，2026-11-22).
+		let optimistic = max(0, min(1, rawBrightness + delta))
+		publish(brightness: optimistic, touchDate: true)
+		NotchUIEventBus.events.send(.sneakPeek(type: .backlight, value: CGFloat(optimistic)))
 		pendingDelta += delta
 		guard flushTask == nil else { return }
 		flushTask = Task { @MainActor in
@@ -224,6 +245,9 @@ final class KeyboardBacklightManager: ObservableObject {
 				pendingDelta = 0
 				// Include changes made outside the app in every adjustment.
 				guard let current = await client.currentKeyboardBrightness() else {
+					// Read failed: the optimistic HUD stays up (it is the only
+					// feedback the key press will get); resync so a later read
+					// corrects the stored value.
 					refresh()
 					return
 				}
@@ -232,7 +256,16 @@ final class KeyboardBacklightManager: ObservableObject {
 				if ok {
 					publish(brightness: target, touchDate: true)
 				} else {
-					refresh()
+					// Write failed: the HUD is showing an intent that never
+					// landed. Fetch the real value and correct the HUD while
+					// it is still visible; if the read fails too, the optimistic
+					// figure stays (still better than blank feedback).
+					if let real = await client.currentKeyboardBrightness() {
+						publish(brightness: real, touchDate: true)
+						NotchUIEventBus.events.send(.sneakPeek(type: .backlight, value: CGFloat(real)))
+					} else {
+						refresh()
+					}
 					return
 				}
 				NotchUIEventBus.events.send(.sneakPeek(type: .backlight, value: CGFloat(target)))

@@ -328,7 +328,7 @@ struct MusicControlSlotButton: View {
                     MusicManager.shared.previousTrack()
                 }
                 .scaleEffect(horizontalMediaGestureFeedback > 0 ? 1.12 : 1)
-                .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.62), value: horizontalMediaGestureFeedback)
+                .animation(StandardAnimations.feedback, value: horizontalMediaGestureFeedback)
             case .playPause:
                 HoverButton(icon: musicManager.isPlaying ? "pause.fill" : "play.fill", scale: .large) {
                     MusicManager.shared.togglePlay()
@@ -338,7 +338,7 @@ struct MusicControlSlotButton: View {
                     MusicManager.shared.nextTrack()
                 }
                 .scaleEffect(horizontalMediaGestureFeedback < 0 ? 1.12 : 1)
-                .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.62), value: horizontalMediaGestureFeedback)
+                .animation(StandardAnimations.feedback, value: horizontalMediaGestureFeedback)
             case .repeatMode:
                 HoverButton(icon: repeatIcon, iconColor: repeatIconColor, scale: .medium) {
                     MusicManager.shared.toggleRepeat()
@@ -518,7 +518,7 @@ struct VolumeControlView: View {
         HStack(spacing: 4) {
             Button(action: {
                 if musicManager.volumeControlSupported {
-                    withAnimation(.easeInOut(duration: 0.12)) {
+                    withAnimation(StandardAnimations.ui) {
                         showVolumeSlider.toggle()
                     }
                 }
@@ -564,7 +564,7 @@ struct VolumeControlView: View {
         }
         .onReceive(musicManager.$volumeControlSupported) { supported in
             if !supported {
-                withAnimation(.easeInOut(duration: 0.2)) {
+                withAnimation(StandardAnimations.fade) {
                     showVolumeSlider = false
                 }
             }
@@ -642,7 +642,7 @@ struct NotchHomeView: View {
                 CameraPreviewView(camera: vm.camera)
                     .scaledToFit()
                     .opacity(vm.notchState == .closed ? 0 : 1)
-                    .animation(.interactiveSpring(response: 0.32, dampingFraction: 0.76, blendDuration: 0), value: shouldShowCamera)
+                    .animation(StandardAnimations.ui, value: shouldShowCamera)
                 
             }
         }
@@ -789,7 +789,7 @@ struct CustomSlider: View {
                         lastDragged = Date()
                     }
             )
-            .animation(.spring(response: 0.35, dampingFraction: 0.7), value: dragging)
+            .animation(StandardAnimations.ui, value: dragging)
         }
     }
 }

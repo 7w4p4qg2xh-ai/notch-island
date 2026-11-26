@@ -62,3 +62,13 @@ signing/
 *.provisionprofile
 *.mobileprovision
 
+
+# ── Notch Island 本地存档约定 ─────────────────────────────
+# vendor/ 是构建必需的本地 Swift 包（工程用 XCLocalSwiftPackageReference 引用），
+# 源码要进仓库，但二进制 dSYM、打包产物和示例工程不进，避免仓库膨胀。
+vendor/_artifacts/
+**/dSYMs/
+vendor/lottie-spm/Example/
+# 本地备份快照、Xcode 临时垃圾
+backups/
+boringNotch.xcodeproj/-Xcc/

@@ -239,7 +239,8 @@ struct NotificationExpandedView: View {
     private var appNameSize: CGFloat { compactLayout ? 14 : 15 }
     private var timeSize: CGFloat { compactLayout ? 11 : 12 }
     private var detailSize: CGFloat { compactLayout ? 12 : 13 }
-    private var bodySize: CGFloat { compactLayout ? 12.5 : 14 }
+    /// 2026-11-24：12.5 是"看着调"出来的半像素值，统一回整档 13。
+    private var bodySize: CGFloat { compactLayout ? 13 : 14 }
     private var bodyLineLimit: Int { compactLayout ? 1 : 2 }
     private var controlSize: CGFloat { compactLayout ? 16 : 18 }
     /// 命中区域。HIG：桌面端可点目标最小 20×20、推荐 28×28。视觉仍然是

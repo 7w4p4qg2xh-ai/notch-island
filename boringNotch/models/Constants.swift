@@ -453,7 +453,10 @@ extension Defaults.Keys {
     static let notchHeight = Key<CGFloat>("notchHeight", default: 32)
     // static let openLastTabByDefault = Key<Bool>("openLastTabByDefault", default: false)
     static let showOnLockScreen = Key<Bool>("showOnLockScreen", default: false)
-    static let hideFromScreenRecording = Key<Bool>("hideFromScreenRecording", default: false)
+    // 2026-11-22: 默认改为 true。浮岛会出现在截图/录屏/共享屏幕画面里，
+    // 共享时观众能看到通知卡片内容（实测 screencapture -R436,0,640,210 可见）。
+    // 设 true 只影响"被捕获"，用户自己屏幕上照样可见。
+    static let hideFromScreenRecording = Key<Bool>("hideFromScreenRecording", default: true)
 
     // MARK: Appearance
     // static let alwaysShowTabs = Key<Bool>("alwaysShowTabs", default: true)

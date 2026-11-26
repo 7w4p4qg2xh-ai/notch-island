@@ -215,6 +215,15 @@ final class NotificationWatcher {
     /// parked window now stays parked for the whole watching session and is
     /// only given back when the watcher stops.
     private var parkedWindows: [Int: (window: AXUIElement, origin: CGPoint)] = [:]
+    /// Siri 让路状态：面板开着时停泊窗口全部回屏、停泊暂停。
+    ///
+    /// 🔴 2026-11-22 实测的硬约束：Siri 面板（`com.apple.SiriNCService`，
+    /// layer 23）的 origin 恒等于「通知中心宿主窗口 origin + (1135, 28)」。
+    /// 宿主被停泊到 (-10000,-10000) 时，面板落在 (-8865,-9972) —— 完全在屏幕
+    /// 外，用户点菜单栏 Siri 图标的表现就是「什么都没弹出来」。把宿主放回
+    /// (0,0)，面板立刻跳到 (1135,28) 正常显示。所以只要 Siri 面板存在，
+    /// 宿主就必须留在屏上，停泊必须让路。
+    private var siriYielded = false
     /// Windows currently showing a banner we do not mirror: the system banner is
     /// the user's only reminder there, so it stays visible until it goes away.
     private var unmirroredWindows = Set<Int>()
@@ -1072,11 +1081,57 @@ final class NotificationWatcher {
     /// these windows (`AXUIElementSetAttributeValue` returns false).
     @discardableResult
     private func hide(_ window: AXUIElement) -> Bool {
+        // 🔴 Siri 让路：面板开着时绝不停泊。返回 false 会让 `ensureParked`
+        // 放弃镜像，把这条横幅留给系统画 —— 那正是对的：宿主此刻在屏上，
+        // 系统横幅本来就可见。
+        guard !siriYielded else { return false }
+        return forceHide(window)
+    }
+
+    @discardableResult
+    private func forceHide(_ window: AXUIElement) -> Bool {
         var hidden = Self.hiddenOrigin
         guard let value = AXValueCreate(.cgPoint, &hidden) else { return false }
         let moved = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value) == .success
         trace("hide move=\(moved)")
         return moved
+    }
+
+    // MARK: - Siri yield
+
+    /// 由 app 驱动：app 侧检测到 Siri 面板开/关后通过 XPC 通知这里。
+    ///
+    /// 🔴 为什么停泊会打瞎 Siri：面板 origin 不是绝对坐标，而是跟着通知中心
+    /// 宿主窗口走 —— 实测宿主停在 (-10000,-10000) 时面板落在 (-8865,-9972)，
+    /// 宿主放回 (0,0) 时面板立刻是 (1135,28)。宿主一旦被挪出屏幕，Siri 就永远
+    /// 没有可见窗口（2026-11-22 用户报「点 AI 根本弹不出窗口」）。
+    ///
+    /// 检测为什么不在 helper 里做：这个进程是沙盒，`CGWindowListCopyWindowInfo`
+    /// 直接返回 nil（同一天实测），而 app 侧同一个调用一直正常工作。
+    func setSiriYield(_ yielding: Bool) {
+        if yielding {
+            yieldToSiri()
+        } else {
+            resumeAfterSiri()
+        }
+    }
+
+    /// 把每个停泊窗口交还原位，但保留 `parkedWindows` 记录 —— Siri 关掉之后
+    /// 还要靠它把同一批窗口重新停泊。
+    private func yieldToSiri() {
+        guard !siriYielded else { return }
+        siriYielded = true
+        NSLog("[boringNotch] Siri panel is open — handing parked windows back so it can render on screen")
+        trace("siri yield begin parked=\(parkedWindows.count)")
+        for parked in parkedWindows.values { giveBack(parked) }
+    }
+
+    private func resumeAfterSiri() {
+        guard siriYielded else { return }
+        siriYielded = false
+        NSLog("[boringNotch] Siri panel closed — re-parking off-screen windows")
+        trace("siri yield end")
+        for parked in parkedWindows.values { _ = forceHide(parked.window) }
     }
 
     private static let hiddenOrigin = CGPoint(x: -10000, y: -10000)

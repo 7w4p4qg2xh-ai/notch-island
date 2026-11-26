@@ -1,0 +1,2409 @@
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the Swift.org open source project
+//
+// Copyright (c) 2014 - 2023 Apple Inc. and the Swift project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+//
+//===----------------------------------------------------------------------===//
+
+#if compiler(>=6)
+@_spi(RawSyntax) @_spi(ExperimentalLanguageFeatures) internal import SwiftSyntax
+#else
+@_spi(RawSyntax) @_spi(ExperimentalLanguageFeatures) import SwiftSyntax
+#endif
+
+extension DeclarationModifier {
+  var canHaveParenthesizedArgument: Bool {
+    switch self {
+    case .__consuming, .__setter_access, ._const, ._local, .async,
+      .borrowing, .class, .consuming, .convenience, .distributed, .dynamic,
+      .final, .indirect, .infix, .isolated, .lazy, .mutating, .nonmutating,
+      .optional, .override, .postfix, .prefix, .reasync, .required,
+      .rethrows, .static, .weak, .sending:
+      return false
+    case .fileprivate, .internal, .nonisolated, .package, .open, .private,
+      .public, .unowned:
+      return true
+    }
+  }
+}
+
+extension TokenConsumer {
+  mutating func atStartOfFreestandingMacroExpansion() -> Bool {
+    // Check if "'#' <identifier>" where the identifier is on the sameline.
+    if !self.at(.pound) {
+      return false
+    }
+    if self.peek().isAtStartOfLine {
+      return false
+    }
+    switch self.peek().rawTokenKind {
+    case .identifier:
+      return true
+    case .keyword:
+      // allow keywords right after '#' so we can diagnose it when parsing.
+      return (self.currentToken.trailingTriviaByteLength == 0 && self.peek().leadingTriviaByteLength == 0)
+    default:
+      return false
+    }
+  }
+
+  /// Returns `true` if the current token represents the start of a declaration
+  /// item.
+  ///
+  /// - Parameters
+  ///   - allowInitDecl: whether to consider 'init' a declaration in the context.
+  ///     Only initializer bodies should use `false` for this.
+  ///   - requiresDecl: Whether only declarations are expected in the context.
+  ///     For example, in member blocks.
+  ///
+  /// - Note: this returns `false` for `#if` unless it's an attribute list.
+  mutating func atStartOfDeclaration(
+    allowInitDecl: Bool = true,
+    requiresDecl: Bool = false
+  ) -> Bool {
+    var subparser = self.lookahead()
+
+    let (hasAttribute, hasModifier) = subparser.skipAttributesAndModifiers()
+
+    if hasAttribute {
+      if subparser.at(.rightBrace) || subparser.at(.endOfFile) || subparser.at(.poundEndif) {
+        return true
+      }
+      if subparser.at(.stringQuote) {
+        // `@"abc"` is an invalid Objective-C-style string literal, not a declaration.
+        return false
+      }
+    }
+
+    switch subparser.at(anyIn: DeclarationKeyword.self)?.0 {
+    case .lhs(.actor):
+      // actor Foo {}
+      return subparser.atStartOfActor(allowInitDecl: allowInitDecl, requiresDecl: requiresDecl)
+    case .lhs(.case):
+      // When 'case' appears inside a function, it's probably a switch
+      // case, not an enum case declaration.
+      return requiresDecl
+    case .lhs(.`init`):
+      return allowInitDecl
+    case .lhs(.macro):
+      // macro Foo ...
+      return subparser.peek().rawTokenKind == .identifier
+    case .lhs(.pound):
+      // Force parsing '#<identifier>' after attributes as a macro expansion decl.
+      if hasAttribute || hasModifier || requiresDecl {
+        return true
+      }
+
+      // Otherwise, parse it as an expression.
+      return false
+    case .lhs(.using):
+      // This declaration doesn't support attributes or modifiers
+      if hasAttribute || hasModifier {
+        return false
+      }
+
+      return subparser.atStartOfUsing()
+    case .some(_):
+      // All other decl start keywords unconditionally start a decl.
+      return true
+    case nil:
+      if subparser.at(anyIn: ContextualDeclKeyword.self)?.0 != nil {
+        subparser.consumeAnyToken()
+        return subparser.atStartOfDeclaration(
+          allowInitDecl: allowInitDecl,
+          requiresDecl: requiresDecl
+        )
+      }
+      if requiresDecl {
+        // If we found any attributes or modifiers, consider it's a missing decl.
+        if hasAttribute || hasModifier {
+          return true
+        }
+        if subparser.atFunctionDeclarationWithoutFuncKeyword() {
+          return true
+        }
+        if subparser.atBindingDeclarationWithoutVarKeyword() {
+          return true
+        }
+        if subparser.currentToken.isEditorPlaceholder {
+          return true
+        }
+      }
+      // Special recovery for 'try let/var'.
+      if subparser.at(.keyword(.try)),
+        subparser.peek(isAtAnyIn: VariableDeclSyntax.BindingSpecifierOptions.self) != nil
+      {
+        return true
+      }
+      return false
+    }
+  }
+}
+
+extension Parser.Lookahead {
+  fileprivate mutating func skipAttributesAndModifiers() -> (hasAttribute: Bool, hasModifier: Bool) {
+    var hasAttribute = false
+    var attributeProgress = LoopProgressCondition()
+    while self.hasProgressed(&attributeProgress) {
+      if self.at(.atSign) {
+        _ = self.consumeAttributeList()
+        hasAttribute = true
+      } else if self.at(.poundIf) && self.consumeIfConfigOfAttributes() {
+        hasAttribute = true
+      } else {
+        break
+      }
+    }
+
+    var hasModifier = false
+    if self.currentToken.isLexerClassifiedKeyword || self.currentToken.rawTokenKind == .identifier {
+      var modifierProgress = LoopProgressCondition()
+      while let (modifierKind, handle) = self.at(anyIn: DeclarationModifier.self),
+        modifierKind != .class,
+        self.hasProgressed(&modifierProgress)
+      {
+        hasModifier = true
+        self.eat(handle)
+        if modifierKind != .open && self.at(.leftParen) && modifierKind.canHaveParenthesizedArgument {
+          // When determining whether we are at a declaration, don't consume anything in parentheses after 'open'
+          // so we don't consider a function call to open as a decl modifier. This matches the C++ parser.
+          self.consumeAnyToken()
+          self.consume(to: .rightParen)
+        }
+      }
+    }
+
+    return (hasAttribute, hasModifier)
+  }
+
+  fileprivate mutating func atStartOfActor(
+    allowInitDecl: Bool,
+    requiresDecl: Bool
+  ) -> Bool {
+    if self.peek().rawTokenKind == .identifier {
+      return true
+    }
+    // actor may be somewhere in the modifier list. Eat the tokens until we get
+    // to something that isn't the start of a decl. If that is an identifier,
+    // it's an actor declaration, otherwise, it isn't.
+    var lookahead = self.lookahead()
+    repeat {
+      lookahead.consumeAnyToken()
+    } while lookahead.atStartOfDeclaration(allowInitDecl: allowInitDecl, requiresDecl: requiresDecl)
+    return lookahead.at(.identifier)
+  }
+
+  fileprivate mutating func atStartOfUsing() -> Bool {
+    var lookahead = self.lookahead()
+
+    // Consume 'using'
+    lookahead.consumeAnyToken()
+
+    // Allow parsing 'using' as declaration only if
+    // it's immediately followed by either `@` or
+    // an identifier.
+    if lookahead.atStartOfLine {
+      return false
+    }
+
+    guard lookahead.at(.atSign) || lookahead.at(.identifier) else {
+      return false
+    }
+
+    return true
+  }
+}
+
+extension Parser {
+  struct DeclAttributes {
+    var attributes: RawAttributeListSyntax
+    var modifiers: RawDeclModifierListSyntax
+
+    init(attributes: RawAttributeListSyntax, modifiers: RawDeclModifierListSyntax) {
+      self.attributes = attributes
+      self.modifiers = modifiers
+    }
+  }
+
+  /// Describes the context around a declaration in order to modify how it is parsed.
+  enum DeclarationParseContext {
+    /// The declaration is in top-level code or a function body; that is, it may be mixed with statements and
+    /// expressions.
+    case topLevelOrCodeBlock
+
+    /// The declaration is in a member list.
+    case memberDeclList
+
+    /// The declaration is in an argument list (for instance, of an `@abi` attribute).
+    case argumentList
+
+    /// Should the parser assume that any syntax it encounters here *must* be declaration syntax? This allows more
+    /// aggressive recovery which might misinterpret statement or expression syntax as malformed declaration syntax.
+    var requiresDecl: Bool {
+      switch self {
+      case .topLevelOrCodeBlock:
+        return false
+      case .memberDeclList, .argumentList:
+        return true
+      }
+    }
+
+    /// If an introducer is not found at the expected location, what token should terminate our search for one?
+    var recoveryPrecedence: TokenPrecedence? {
+      switch self {
+      case .topLevelOrCodeBlock:
+        // Scan as far as we want.
+        return nil
+      case .memberDeclList:
+        // Don't scan past the enclosing brace.
+        return .closingBrace
+      case .argumentList:
+        // Don't scan past the closing parenthesis.
+        return .weakBracketed(closingDelimiter: .rightParen)
+      }
+    }
+
+    /// Is `#if` allowed in this context? If not, we parse it into unexpected syntax on whatever declaration is nested
+    /// inside it.
+    var allowsIfConfigDecl: Bool {
+      switch self {
+      case .topLevelOrCodeBlock, .memberDeclList:
+        return true
+      case .argumentList:
+        return false
+      }
+    }
+  }
+
+  /// Parse a declaration.
+  ///
+  /// - Parameter context: Describes the code around the declaration being parsed. This affects how the parser tries
+  ///                      to recover from malformed syntax in the declaration.
+  mutating func parseDeclaration(in context: DeclarationParseContext = .topLevelOrCodeBlock) -> RawDeclSyntax {
+    let attrs = DeclAttributes(
+      attributes: self.parseAttributeList(),
+      modifiers: self.parseDeclModifierList()
+    )
+
+    let recoveryResult: (match: DeclarationKeyword, handle: RecoveryConsumptionHandle)?
+    if let atResult = self.at(anyIn: DeclarationKeyword.self) {
+      // We are at a keyword that starts a declaration. Parse that declaration.
+      recoveryResult = (atResult.spec, .noRecovery(atResult.handle))
+    } else if atFunctionDeclarationWithoutFuncKeyword() {
+      // We aren't at a declaration keyword and it looks like we are at a function
+      // declaration. Parse a function declaration.
+      recoveryResult = (.lhs(.func), .missing(.keyword(.func)))
+    } else if atBindingDeclarationWithoutVarKeyword() {
+      recoveryResult = (.rhs(.var), .missing(.keyword(.var)))
+    } else {
+      // In all other cases, use standard token recovery to find the declaration
+      // to parse.
+      recoveryResult = self.canRecoverTo(
+        anyIn: DeclarationKeyword.self,
+        overrideRecoveryPrecedence: context.recoveryPrecedence
+      )
+    }
+
+    switch recoveryResult {
+    case (.lhs(.import), let handle)?:
+      return RawDeclSyntax(self.parseImportDeclaration(attrs, handle))
+    case (.lhs(.class), let handle)?:
+      return RawDeclSyntax(
+        self.parseNominalTypeDeclaration(for: RawClassDeclSyntax.self, attrs: attrs, introucerHandle: handle)
+      )
+    case (.lhs(.enum), let handle)?:
+      return RawDeclSyntax(
+        self.parseNominalTypeDeclaration(for: RawEnumDeclSyntax.self, attrs: attrs, introucerHandle: handle)
+      )
+    case (.lhs(.case), let handle)?:
+      return RawDeclSyntax(self.parseEnumCaseDeclaration(attrs, handle))
+    case (.lhs(.struct), let handle)?:
+      return RawDeclSyntax(
+        self.parseNominalTypeDeclaration(for: RawStructDeclSyntax.self, attrs: attrs, introucerHandle: handle)
+      )
+    case (.lhs(.protocol), let handle)?:
+      return RawDeclSyntax(
+        self.parseNominalTypeDeclaration(for: RawProtocolDeclSyntax.self, attrs: attrs, introucerHandle: handle)
+      )
+    case (.lhs(.associatedtype), let handle)?:
+      return RawDeclSyntax(self.parseAssociatedTypeDeclaration(attrs, handle))
+    case (.lhs(.typealias), let handle)?:
+      return RawDeclSyntax(self.parseTypealiasDeclaration(attrs, handle))
+    case (.lhs(.extension), let handle)?:
+      return RawDeclSyntax(self.parseExtensionDeclaration(attrs, handle))
+    case (.lhs(.func), let handle)?:
+      return RawDeclSyntax(self.parseFuncDeclaration(attrs, handle))
+    case (.lhs(.subscript), let handle)?:
+      return RawDeclSyntax(self.parseSubscriptDeclaration(attrs, handle))
+    case (.lhs(.`init`), let handle)?:
+      return RawDeclSyntax(self.parseInitializerDeclaration(attrs, handle))
+    case (.lhs(.deinit), let handle)?:
+      return RawDeclSyntax(self.parseDeinitializerDeclaration(attrs, handle))
+    case (.lhs(.operator), let handle)?:
+      return RawDeclSyntax(self.parseOperatorDeclaration(attrs, handle))
+    case (.lhs(.precedencegroup), let handle)?:
+      return RawDeclSyntax(self.parsePrecedenceGroupDeclaration(attrs, handle))
+    case (.lhs(.actor), let handle)?:
+      return RawDeclSyntax(
+        self.parseNominalTypeDeclaration(for: RawActorDeclSyntax.self, attrs: attrs, introucerHandle: handle)
+      )
+    case (.lhs(.macro), let handle)?:
+      return RawDeclSyntax(self.parseMacroDeclaration(attrs: attrs, introducerHandle: handle))
+    case (.lhs(.pound), let handle)?:
+      return RawDeclSyntax(self.parseMacroExpansionDeclaration(attrs, handle))
+    case (.lhs(.using), let handle)?:
+      return RawDeclSyntax(self.parseUsingDeclaration(attrs: attrs, introducerHandle: handle))
+    case (.rhs, let handle)?:
+      return RawDeclSyntax(self.parseBindingDeclaration(attrs, handle, in: context))
+    case nil:
+      break
+    }
+
+    if context.requiresDecl {
+      if self.currentToken.isEditorPlaceholder {
+        let placeholder = self.parseAnyIdentifier()
+        return RawDeclSyntax(
+          RawMissingDeclSyntax(
+            attributes: attrs.attributes,
+            modifiers: attrs.modifiers,
+            placeholder: placeholder,
+            arena: self.arena
+          )
+        )
+      }
+    }
+    return RawDeclSyntax(
+      RawMissingDeclSyntax(
+        attributes: attrs.attributes,
+        modifiers: attrs.modifiers,
+        arena: self.arena
+      )
+    )
+  }
+}
+
+extension TokenConsumer {
+  /// Returns `true` if it looks like the parser is positioned at a variable declaration that’s missing the `var` keyword.
+  fileprivate mutating func atBindingDeclarationWithoutVarKeyword() -> Bool {
+    if self.at(.identifier, .wildcard),
+      self.peek(isAt: .colon, .equal, .comma)
+    {
+      return true
+    }
+    if self.at(.leftParen),
+      self.peek(isAt: .identifier, .wildcard),
+      self.withLookahead({
+        $0.skipSingle(); return $0.at(.colon, .equal)
+      })
+    {
+      return true
+    }
+
+    return false
+  }
+
+  /// Returns `true` if it looks like the parser is positioned at a function declaration that’s missing the `func` keyword.
+  fileprivate mutating func atFunctionDeclarationWithoutFuncKeyword() -> Bool {
+    var nextTokenIsLeftParenOrLeftAngle: Bool {
+      self.peek(isAt: .leftParen) || self.peek().tokenText.hasPrefix("<")
+    }
+
+    if self.at(.identifier) {
+      return nextTokenIsLeftParenOrLeftAngle
+    } else if self.at(anyIn: Operator.self) != nil {
+      if self.currentToken.tokenText.hasSuffix("<") && self.peek(isAt: .identifier) {
+        return true
+      }
+      return nextTokenIsLeftParenOrLeftAngle
+    } else {
+      return false
+    }
+  }
+}
+
+extension Parser {
+  /// Parse an import declaration.
+  mutating func parseImportDeclaration(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle
+  ) -> RawImportDeclSyntax {
+    let (unexpectedBeforeImportKeyword, importKeyword) = self.eat(handle)
+    let kind = self.parseImportKind()
+    let path = self.parseImportPath(hasImportKind: kind != nil)
+    return RawImportDeclSyntax(
+      attributes: attrs.attributes,
+      modifiers: attrs.modifiers,
+      unexpectedBeforeImportKeyword,
+      importKeyword: importKeyword,
+      importKindSpecifier: kind,
+      path: path,
+      arena: self.arena
+    )
+  }
+
+  mutating func parseImportKind() -> RawTokenSyntax? {
+    return self.consume(ifAnyIn: ImportDeclSyntax.ImportKindSpecifierOptions.self)
+  }
+
+  mutating func parseImportPath(hasImportKind: Bool) -> RawImportPathComponentListSyntax {
+    var elements = [RawImportPathComponentSyntax]()
+
+    // Special case: scoped import with module selector-style syntax. This always has exactly two path components
+    // separated by '::'.
+    if hasImportKind,
+      let (moduleNameOrUnexpected, colonColon, unexpectedAfterColonColon, skipQualifiedName) =
+        self.consumeModuleSelectorTokensIfPresent()
+    {
+      // Is the token in module name position really a module name?
+      let unexpectedBeforeModuleName: RawUnexpectedNodesSyntax?
+      let moduleName: RawTokenSyntax
+      if moduleNameOrUnexpected.tokenKind == .identifier {
+        unexpectedBeforeModuleName = nil
+        moduleName = moduleNameOrUnexpected
+      } else {
+        unexpectedBeforeModuleName = RawUnexpectedNodesSyntax([moduleNameOrUnexpected], arena: self.arena)
+        moduleName = self.missingToken(.identifier)
+      }
+
+      let declName = skipQualifiedName ? self.missingToken(.identifier) : self.parseAnyIdentifier()
+
+      elements = [
+        RawImportPathComponentSyntax(
+          unexpectedBeforeModuleName,
+          name: moduleName,
+          trailingPeriod: colonColon,
+          RawUnexpectedNodesSyntax(unexpectedAfterColonColon, arena: self.arena),
+          arena: self.arena
+        ),
+        RawImportPathComponentSyntax(
+          name: declName,
+          trailingPeriod: nil,
+          arena: self.arena
+        ),
+      ]
+    } else {
+      var keepGoing: RawTokenSyntax? = nil
+      var loopProgress = LoopProgressCondition()
+      repeat {
+        let name = self.parseAnyIdentifier()
+        keepGoing = self.consume(if: .period)
+
+        // '::' is not valid if we got here, but someone might try to use it anyway.
+        let unexpectedAfterTrailingPeriod: RawUnexpectedNodesSyntax?
+        if keepGoing == nil, let colonColon = self.consume(if: .colonColon) {
+          unexpectedAfterTrailingPeriod = RawUnexpectedNodesSyntax([colonColon], arena: self.arena)
+          keepGoing = self.missingToken(.period)
+        } else {
+          unexpectedAfterTrailingPeriod = nil
+        }
+
+        elements.append(
+          RawImportPathComponentSyntax(
+            name: name,
+            trailingPeriod: keepGoing,
+            unexpectedAfterTrailingPeriod,
+            arena: self.arena
+          )
+        )
+      } while keepGoing != nil && self.hasProgressed(&loopProgress)
+    }
+    return RawImportPathComponentListSyntax(elements: elements, arena: self.arena)
+  }
+}
+
+extension Parser {
+  mutating func parseUsingDeclaration(
+    attrs: DeclAttributes,
+    introducerHandle handle: RecoveryConsumptionHandle
+  ) -> RawUsingDeclSyntax {
+    let unexpectedAttributes: RawUnexpectedNodesSyntax? =
+      if !attrs.attributes.isEmpty {
+        RawUnexpectedNodesSyntax(attrs.attributes.elements, arena: self.arena)
+      } else {
+        nil
+      }
+
+    let unexpectedModifiers: RawUnexpectedNodesSyntax? =
+      if !attrs.modifiers.isEmpty {
+        RawUnexpectedNodesSyntax(attrs.modifiers.elements, arena: self.arena)
+      } else {
+        nil
+      }
+
+    let (unexpectedBeforeKeyword, usingKeyword) = self.eat(handle)
+
+    let unexpectedBeforeUsingKeyword = RawUnexpectedNodesSyntax(
+      combining: unexpectedAttributes,
+      unexpectedModifiers,
+      unexpectedBeforeKeyword,
+      arena: self.arena
+    )
+
+    if self.at(.atSign) {
+      return RawUsingDeclSyntax(
+        unexpectedBeforeUsingKeyword,
+        usingKeyword: usingKeyword,
+        specifier: .attribute(self.parseAttribute()),
+        arena: self.arena
+      )
+    }
+
+    let modifier = self.expectWithoutRecovery(.identifier)
+
+    return RawUsingDeclSyntax(
+      unexpectedBeforeUsingKeyword,
+      usingKeyword: usingKeyword,
+      specifier: .modifier(modifier),
+      arena: self.arena
+    )
+  }
+}
+
+extension Parser {
+  /// Parse an extension declaration.
+  mutating func parseExtensionDeclaration(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle
+  ) -> RawExtensionDeclSyntax {
+    let (unexpectedBeforeExtensionKeyword, extensionKeyword) = self.eat(handle)
+    let type = self.parseType()
+
+    let inheritance: RawInheritanceClauseSyntax?
+    if self.at(.colon) {
+      inheritance = self.parseInheritance()
+    } else {
+      inheritance = nil
+    }
+
+    let whereClause: RawGenericWhereClauseSyntax?
+    if self.at(.keyword(.where)) {
+      whereClause = self.parseGenericWhereClause()
+    } else {
+      whereClause = nil
+    }
+    let memberBlock = self.parseMemberBlock(introducer: extensionKeyword)
+    return RawExtensionDeclSyntax(
+      attributes: attrs.attributes,
+      modifiers: attrs.modifiers,
+      unexpectedBeforeExtensionKeyword,
+      extensionKeyword: extensionKeyword,
+      extendedType: type,
+      inheritanceClause: inheritance,
+      genericWhereClause: whereClause,
+      memberBlock: memberBlock,
+      arena: self.arena
+    )
+  }
+}
+
+extension Parser {
+  mutating func parseGenericParameters() -> RawGenericParameterClauseSyntax {
+    if let remainingTokens = remainingTokensIfMaximumNestingLevelReached() {
+      return RawGenericParameterClauseSyntax(
+        remainingTokens,
+        leftAngle: missingToken(.leftAngle),
+        parameters: RawGenericParameterListSyntax(elements: [], arena: self.arena),
+        genericWhereClause: nil,
+        rightAngle: missingToken(.rightAngle),
+        arena: self.arena
+      )
+    }
+
+    let langle = self.expectWithoutRecovery(prefix: "<", as: .leftAngle)
+    var elements = [RawGenericParameterSyntax]()
+    do {
+      var keepGoing: RawTokenSyntax? = nil
+      var loopProgress = LoopProgressCondition()
+      repeat {
+        let attributes = self.parseAttributeList()
+
+        // Parse the 'each' keyword for a type parameter pack 'each T' or a
+        // 'let' keyword for a value parameter 'let N: Int'.
+        var specifier = self.consume(if: .keyword(.each), .keyword(.let))
+
+        let (unexpectedBetweenSpecifierAndName, name) = self.expectIdentifier(allowSelfOrCapitalSelfAsIdentifier: true)
+        if attributes.isEmpty && specifier == nil && unexpectedBetweenSpecifierAndName == nil && name.isMissing
+          && elements.isEmpty && !self.at(prefix: ">")
+        {
+          break
+        }
+
+        // Parse the unsupported ellipsis for a type parameter pack 'T...'.
+        let unexpectedBetweenNameAndColon: RawUnexpectedNodesSyntax?
+        if let ellipsis = self.consume(ifPrefix: "...", as: .ellipsis) {
+          unexpectedBetweenNameAndColon = RawUnexpectedNodesSyntax([ellipsis], arena: self.arena)
+          if specifier == nil {
+            specifier = missingToken(.each)
+          }
+        } else {
+          unexpectedBetweenNameAndColon = nil
+        }
+
+        // Parse the ':' followed by a type.
+        let colon = self.consume(if: .colon)
+        let unexpectedBeforeInherited: RawUnexpectedNodesSyntax?
+        let inherited: RawTypeSyntax?
+        if colon != nil {
+          if self.at(.identifier, .keyword(.protocol), .keyword(.Any)) || self.atContextualPunctuator("~") {
+            unexpectedBeforeInherited = nil
+            inherited = self.parseType()
+          } else if let classKeyword = self.consume(if: .keyword(.class)) {
+            unexpectedBeforeInherited = RawUnexpectedNodesSyntax([classKeyword], arena: self.arena)
+            inherited = RawTypeSyntax(
+              RawIdentifierTypeSyntax(
+                moduleSelector: nil,
+                name: missingToken(.identifier, text: "AnyObject"),
+                genericArgumentClause: nil,
+                arena: self.arena
+              )
+            )
+          } else {
+            unexpectedBeforeInherited = nil
+            inherited = RawTypeSyntax(RawMissingTypeSyntax(arena: self.arena))
+          }
+        } else {
+          unexpectedBeforeInherited = nil
+          inherited = nil
+        }
+        keepGoing = self.consume(if: .comma)
+        elements.append(
+          RawGenericParameterSyntax(
+            attributes: attributes,
+            specifier: specifier,
+            unexpectedBetweenSpecifierAndName,
+            name: name,
+            unexpectedBetweenNameAndColon,
+            colon: colon,
+            unexpectedBeforeInherited,
+            inheritedType: inherited,
+            trailingComma: keepGoing,
+            arena: self.arena
+          )
+        )
+      } while keepGoing != nil && !atGenericParametersListTerminator() && self.hasProgressed(&loopProgress)
+    }
+
+    let whereClause: RawGenericWhereClauseSyntax?
+    if self.at(.keyword(.where)) {
+      whereClause = self.parseGenericWhereClause()
+    } else {
+      whereClause = nil
+    }
+
+    let rangle = expectWithoutRecovery(prefix: ">", as: .rightAngle)
+
+    let parameters: RawGenericParameterListSyntax
+    if elements.isEmpty && rangle.isMissing {
+      parameters = RawGenericParameterListSyntax(elements: [], arena: self.arena)
+    } else {
+      parameters = RawGenericParameterListSyntax(elements: elements, arena: self.arena)
+    }
+    return RawGenericParameterClauseSyntax(
+      leftAngle: langle,
+      parameters: parameters,
+      genericWhereClause: whereClause,
+      rightAngle: rangle,
+      arena: self.arena
+    )
+  }
+
+  mutating func atGenericParametersListTerminator() -> Bool {
+    return self.at(prefix: ">")
+  }
+
+  mutating func parseSameTypeLeftType() -> RawSameTypeRequirementSyntax.LeftType {
+    if let valueType = self.parseValueType() {
+      return .expr(valueType)
+    } else {
+      return .type(self.parseType())
+    }
+  }
+
+  mutating func parseSameTypeRightType() -> RawSameTypeRequirementSyntax.RightType {
+    if let valueType = self.parseValueType() {
+      return .expr(valueType)
+    } else {
+      return .type(self.parseType())
+    }
+  }
+
+  mutating func parseGenericWhereClause() -> RawGenericWhereClauseSyntax {
+    let (unexpectedBeforeWhereKeyword, whereKeyword) = self.expect(.keyword(.where))
+
+    var elements = [RawGenericRequirementSyntax]()
+    do {
+      var keepGoing: RawTokenSyntax? = nil
+      var loopProgress = LoopProgressCondition()
+      repeat {
+        let firstArgument = self.parseSameTypeLeftType()
+
+        guard !firstArgument.raw.is(RawMissingTypeSyntax.self) else {
+          keepGoing = self.consume(if: .comma)
+          elements.append(
+            RawGenericRequirementSyntax(
+              requirement: .sameTypeRequirement(
+                RawSameTypeRequirementSyntax(
+                  leftType: firstArgument,
+                  equal: missingToken(.binaryOperator, text: "=="),
+                  rightType: .type(RawTypeSyntax(RawMissingTypeSyntax(arena: self.arena))),
+                  arena: self.arena
+                )
+              ),
+              trailingComma: keepGoing,
+              arena: self.arena
+            )
+          )
+          continue
+        }
+
+        let requirement: RawGenericRequirementSyntax.Requirement
+
+        switch firstArgument {
+        // If the first argument is an expression, then we have to have a same
+        // type requirement. We do not allow conformance requirements like
+        // '123: Protocol' or layout constraints on expressions.
+        case .expr:
+          let (unexpectedBeforeEqual, equal) = self.expect(
+            anyIn: SameTypeRequirementSyntax.EqualOptions.self,
+            default: .binaryOperator
+          )
+          let secondArgument = self.parseSameTypeRightType()
+          requirement = .sameTypeRequirement(
+            RawSameTypeRequirementSyntax(
+              leftType: firstArgument,
+              unexpectedBeforeEqual,
+              equal: equal,
+              rightType: secondArgument,
+              arena: self.arena
+            )
+          )
+
+        // Otherwise, this can be a conformance, same type, or layout constraint.
+        case .type(let firstType):
+          enum ExpectedTokenKind: TokenSpecSet {
+            case colon
+            case binaryOperator
+            case postfixOperator
+            case prefixOperator
+
+            init?(lexeme: Lexer.Lexeme, experimentalFeatures: Parser.ExperimentalFeatures) {
+              switch (lexeme.rawTokenKind, lexeme.tokenText) {
+              case (.colon, _): self = .colon
+              case (.binaryOperator, "=="): self = .binaryOperator
+              case (.postfixOperator, "=="): self = .postfixOperator
+              case (.prefixOperator, "=="): self = .prefixOperator
+              default: return nil
+              }
+            }
+
+            var spec: TokenSpec {
+              switch self {
+              case .colon: return .colon
+              case .binaryOperator: return .binaryOperator
+              case .postfixOperator: return .postfixOperator
+              case .prefixOperator: return .prefixOperator
+              }
+            }
+          }
+
+          switch self.at(anyIn: ExpectedTokenKind.self) {
+          case (.colon, let handle)?:
+            let colon = self.eat(handle)
+            // A conformance-requirement.
+            if let (layoutSpecifier, handle) = self.at(anyIn: LayoutRequirementSyntax.LayoutSpecifierOptions.self) {
+              // Parse a layout constraint.
+              let specifier = self.eat(handle)
+
+              let unexpectedBeforeLeftParen: RawUnexpectedNodesSyntax?
+              let leftParen: RawTokenSyntax?
+              let size: RawTokenSyntax?
+              let comma: RawTokenSyntax?
+              let alignment: RawTokenSyntax?
+              let unexpectedBeforeRightParen: RawUnexpectedNodesSyntax?
+              let rightParen: RawTokenSyntax?
+
+              var hasArguments: Bool {
+                switch layoutSpecifier {
+                case ._Trivial,
+                  ._TrivialAtMost,
+                  ._TrivialStride:
+                  return true
+
+                case ._UnknownLayout,
+                  ._RefCountedObject,
+                  ._NativeRefCountedObject,
+                  ._Class,
+                  ._NativeClass,
+                  ._BridgeObject:
+                  return false
+                }
+              }
+
+              // Unlike the other layout constraints, _Trivial's argument list
+              // is optional.
+              if hasArguments && (layoutSpecifier != ._Trivial || self.at(.leftParen)) {
+                (unexpectedBeforeLeftParen, leftParen) = self.expect(.leftParen)
+                size = self.expectWithoutRecovery(.integerLiteral)
+                comma = self.consume(if: .comma)
+                if comma != nil {
+                  alignment = self.expectWithoutRecovery(.integerLiteral)
+                } else {
+                  alignment = nil
+                }
+                (unexpectedBeforeRightParen, rightParen) = self.expect(.rightParen)
+              } else {
+                unexpectedBeforeLeftParen = nil
+                leftParen = nil
+                size = nil
+                comma = nil
+                alignment = nil
+                unexpectedBeforeRightParen = nil
+                rightParen = nil
+              }
+
+              requirement = .layoutRequirement(
+                RawLayoutRequirementSyntax(
+                  type: firstType,
+                  colon: colon,
+                  layoutSpecifier: specifier,
+                  unexpectedBeforeLeftParen,
+                  leftParen: leftParen,
+                  size: size,
+                  comma: comma,
+                  alignment: alignment,
+                  unexpectedBeforeRightParen,
+                  rightParen: rightParen,
+                  arena: self.arena
+                )
+              )
+            } else {
+              // Parse the protocol or composition.
+              let secondType = self.parseType()
+              requirement = .conformanceRequirement(
+                RawConformanceRequirementSyntax(
+                  leftType: firstType,
+                  colon: colon,
+                  rightType: secondType,
+                  arena: self.arena
+                )
+              )
+            }
+          case (.binaryOperator, let handle)?,
+            (.postfixOperator, let handle)?,
+            (.prefixOperator, let handle)?:
+            let equal = self.eat(handle)
+            let secondArgument = self.parseSameTypeRightType()
+            requirement = .sameTypeRequirement(
+              RawSameTypeRequirementSyntax(
+                leftType: firstArgument,
+                equal: equal,
+                rightType: secondArgument,
+                arena: self.arena
+              )
+            )
+          case nil:
+            requirement = .sameTypeRequirement(
+              RawSameTypeRequirementSyntax(
+                leftType: firstArgument,
+                equal: RawTokenSyntax(missing: .binaryOperator, text: "==", arena: self.arena),
+                rightType: .type(RawTypeSyntax(RawMissingTypeSyntax(arena: self.arena))),
+                arena: self.arena
+              )
+            )
+          }
+        }
+
+        keepGoing = self.consume(if: .comma)
+        let unexpectedBetweenBodyAndTrailingComma: RawUnexpectedNodesSyntax?
+
+        // If there's a comma, keep parsing the list.
+        // If there's a "&&", diagnose replace with a comma and keep parsing
+        if let token = self.consumeIfContextualPunctuator("&&") {
+          keepGoing = self.missingToken(.comma)
+          unexpectedBetweenBodyAndTrailingComma = RawUnexpectedNodesSyntax([token], arena: self.arena)
+        } else {
+          unexpectedBetweenBodyAndTrailingComma = nil
+        }
+
+        elements.append(
+          RawGenericRequirementSyntax(
+            requirement: requirement,
+            unexpectedBetweenBodyAndTrailingComma,
+            trailingComma: keepGoing,
+            arena: self.arena
+          )
+        )
+      } while keepGoing != nil && !self.atWhereClauseListTerminator() && self.hasProgressed(&loopProgress)
+    }
+
+    return RawGenericWhereClauseSyntax(
+      unexpectedBeforeWhereKeyword,
+      whereKeyword: whereKeyword,
+      requirements: RawGenericRequirementListSyntax(elements: elements, arena: self.arena),
+      arena: self.arena
+    )
+  }
+
+  mutating func atWhereClauseListTerminator() -> Bool {
+    return self.at(.leftBrace)
+  }
+}
+
+extension Parser {
+  mutating func parseMemberBlockItem(until stopCondition: (inout Parser) -> Bool) -> RawMemberBlockItemSyntax? {
+    let startToken = self.currentToken
+    if let syntax = self.loadCurrentSyntaxNodeFromCache(for: .memberBlockItem) {
+      self.registerNodeForIncrementalParse(node: syntax.raw, startToken: startToken)
+      return RawMemberBlockItemSyntax(syntax.raw)
+    }
+    if let remainingTokens = remainingTokensIfMaximumNestingLevelReached() {
+      let item = RawMemberBlockItemSyntax(
+        remainingTokens,
+        decl: RawMissingDeclSyntax(
+          attributes: self.emptyCollection(RawAttributeListSyntax.self),
+          modifiers: self.emptyCollection(RawDeclModifierListSyntax.self),
+          arena: self.arena
+        ),
+        semicolon: nil,
+        arena: self.arena
+      )
+      return item
+    }
+
+    let decl: RawDeclSyntax
+    let attachSemi: Bool
+    if self.at(.poundSourceLocation) {
+      decl = RawDeclSyntax(self.parsePoundSourceLocationDirective())
+      attachSemi = false
+    } else if self.at(.poundIf) && !self.withLookahead({ $0.consumeIfConfigOfAttributes() }) {
+      decl = RawDeclSyntax(
+        self.parsePoundIfDirective { parser in
+          return .decls(parser.parseMemberDeclList(until: { $0.atEndOfIfConfigClauseBody() }))
+        }
+      )
+      attachSemi = false
+    } else if self.atStartOfDeclaration(allowInitDecl: true, requiresDecl: true) {
+      decl = self.parseDeclaration(in: .memberDeclList)
+      attachSemi = true
+    } else {
+      // Otherwise, eat the unexpected tokens into an "decl".
+      decl = RawDeclSyntax(
+        self.parseUnexpectedCodeDeclaration(allowInitDecl: true, requiresDecl: true, until: stopCondition)
+      )
+      attachSemi = true
+    }
+
+    let semi: RawTokenSyntax?
+    var trailingSemis: [RawTokenSyntax] = []
+    if attachSemi {
+      if !decl.isEmpty {
+        semi = self.consume(if: .semicolon)
+      } else {
+        semi = nil
+      }
+      while let trailingSemi = self.consume(if: .semicolon) {
+        trailingSemis.append(trailingSemi)
+      }
+    } else {
+      semi = nil
+    }
+
+    if decl.isEmpty && semi == nil && trailingSemis.isEmpty {
+      return nil
+    }
+
+    let result = RawMemberBlockItemSyntax(
+      decl: decl,
+      semicolon: semi,
+      RawUnexpectedNodesSyntax(trailingSemis, arena: self.arena),
+      arena: self.arena
+    )
+
+    self.registerNodeForIncrementalParse(node: result.raw, startToken: startToken)
+
+    return result
+  }
+
+  mutating func parseMemberDeclList(
+    until stopCondition: (inout Parser) -> Bool = { $0.at(.rightBrace) || $0.atEndOfIfConfigClauseBody() }
+  ) -> RawMemberBlockItemListSyntax {
+    var elements = [RawMemberBlockItemSyntax]()
+    do {
+      var loopProgress = LoopProgressCondition()
+      while !stopCondition(&self), !self.at(.endOfFile), self.hasProgressed(&loopProgress) {
+        let newItemAtStartOfLine = self.atStartOfLine
+        guard let newElement = self.parseMemberBlockItem(until: stopCondition) else {
+          break
+        }
+        if let lastItem = elements.last,
+          lastItem.semicolon == nil && !newItemAtStartOfLine && !newElement.decl.is(RawUnexpectedCodeDeclSyntax.self)
+        {
+          elements[elements.count - 1] = RawMemberBlockItemSyntax(
+            lastItem.unexpectedBeforeDecl,
+            decl: lastItem.decl,
+            lastItem.unexpectedBetweenDeclAndSemicolon,
+            semicolon: self.missingToken(.semicolon),
+            lastItem.unexpectedAfterSemicolon,
+            arena: self.arena
+          )
+
+        }
+        elements.append(newElement)
+      }
+    }
+    return RawMemberBlockItemListSyntax(elements: elements, arena: self.arena)
+  }
+
+  /// `introducer` is the `struct`, `class`, ... keyword that is the cause that the member decl block is being parsed.
+  /// If the left brace is missing, its indentation will be used to judge whether a following `}` was
+  /// indented to close this code block or a surrounding context. See `expectRightBrace`.
+  mutating func parseMemberBlock(introducer: RawTokenSyntax? = nil) -> RawMemberBlockSyntax {
+    let (unexpectedBeforeLBrace, lbrace) = self.expect(.leftBrace)
+    let members = parseMemberDeclList()
+    let (unexpectedBeforeRBrace, rbrace) = self.expectRightBrace(leftBrace: lbrace, introducer: introducer)
+
+    return RawMemberBlockSyntax(
+      unexpectedBeforeLBrace,
+      leftBrace: lbrace,
+      members: members,
+      unexpectedBeforeRBrace,
+      rightBrace: rbrace,
+      arena: self.arena
+    )
+  }
+}
+
+extension Parser {
+  /// Parse an enum 'case' declaration.
+  mutating func parseEnumCaseDeclaration(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle
+  ) -> RawEnumCaseDeclSyntax {
+    let (unexpectedBeforeCaseKeyword, caseKeyword) = self.eat(handle)
+    var elements = [RawEnumCaseElementSyntax]()
+    do {
+      var keepGoing: RawTokenSyntax? = nil
+      var loopProgress = LoopProgressCondition()
+      repeat {
+        let unexpectedPeriod = self.consume(if: .period)
+        let (unexpectedBeforeName, name) = self.expectIdentifier(keywordRecovery: true)
+
+        let unexpectedGenericParameters: RawUnexpectedNodesSyntax?
+        if self.at(prefix: "<") {
+          let genericParameters = self.parseGenericParameters()
+          unexpectedGenericParameters = RawUnexpectedNodesSyntax([genericParameters], arena: self.arena)
+        } else {
+          unexpectedGenericParameters = nil
+        }
+
+        let parameterClause: RawEnumCaseParameterClauseSyntax?
+        if self.at(TokenSpec(.leftParen)) {
+          parameterClause = self.parseParameterClause(RawEnumCaseParameterClauseSyntax.self) { parser in
+            parser.parseEnumCaseParameter()
+          }
+        } else {
+          parameterClause = nil
+        }
+
+        // See if there's a raw value expression.
+        let rawValue: RawInitializerClauseSyntax?
+        if let eq = self.consume(if: .equal) {
+          let value = self.parseExpression(flavor: .basic, pattern: .none)
+          rawValue = RawInitializerClauseSyntax(
+            equal: eq,
+            value: value,
+            arena: self.arena
+          )
+        } else {
+          rawValue = nil
+        }
+
+        // Continue through the comma-separated list.
+        keepGoing = self.consume(if: .comma)
+        elements.append(
+          RawEnumCaseElementSyntax(
+            RawUnexpectedNodesSyntax(combining: unexpectedPeriod, unexpectedBeforeName, arena: self.arena),
+            name: name,
+            unexpectedGenericParameters,
+            parameterClause: parameterClause,
+            rawValue: rawValue,
+            trailingComma: keepGoing,
+            arena: self.arena
+          )
+        )
+      } while keepGoing != nil && self.hasProgressed(&loopProgress)
+    }
+
+    return RawEnumCaseDeclSyntax(
+      attributes: attrs.attributes,
+      modifiers: attrs.modifiers,
+      unexpectedBeforeCaseKeyword,
+      caseKeyword: caseKeyword,
+      elements: RawEnumCaseElementListSyntax(elements: elements, arena: self.arena),
+      arena: self.arena
+    )
+  }
+
+  /// Parse an associated type declaration.
+  mutating func parseAssociatedTypeDeclaration(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle
+  ) -> RawAssociatedTypeDeclSyntax {
+    let (unexpectedBeforeAssocKeyword, assocKeyword) = self.eat(handle)
+
+    // Detect an attempt to use a type parameter pack.
+    let eachKeyword = self.consume(if: .keyword(.each))
+
+    var (unexpectedBeforeName, name) = self.expectIdentifier(keywordRecovery: true)
+    if eachKeyword != nil {
+      unexpectedBeforeName = RawUnexpectedNodesSyntax(combining: eachKeyword, unexpectedBeforeName, arena: self.arena)
+    }
+
+    if unexpectedBeforeName == nil && name.isMissing {
+      return RawAssociatedTypeDeclSyntax(
+        attributes: attrs.attributes,
+        modifiers: attrs.modifiers,
+        unexpectedBeforeAssocKeyword,
+        associatedtypeKeyword: assocKeyword,
+        unexpectedBeforeName,
+        name: name,
+        inheritanceClause: nil,
+        initializer: nil,
+        genericWhereClause: nil,
+        arena: self.arena
+      )
+    }
+
+    // Detect an attempt to use (early syntax) type parameter pack.
+    let ellipsis = self.consume(ifPrefix: "...", as: .ellipsis)
+
+    // Parse optional inheritance clause.
+    let inheritance: RawInheritanceClauseSyntax?
+    if self.at(.colon) {
+      inheritance = self.parseInheritance()
+    } else {
+      inheritance = nil
+    }
+
+    // Parse default type, if any.
+    let defaultType: RawTypeInitializerClauseSyntax?
+    if let equal = self.consume(if: .equal) {
+      let type = self.parseType()
+      defaultType = RawTypeInitializerClauseSyntax(
+        equal: equal,
+        value: type,
+        arena: self.arena
+      )
+    } else {
+      defaultType = nil
+    }
+
+    // Parse a 'where' clause if present.
+    let whereClause: RawGenericWhereClauseSyntax?
+    if self.at(.keyword(.where)) {
+      whereClause = self.parseGenericWhereClause()
+    } else {
+      whereClause = nil
+    }
+
+    return RawAssociatedTypeDeclSyntax(
+      attributes: attrs.attributes,
+      modifiers: attrs.modifiers,
+      unexpectedBeforeAssocKeyword,
+      associatedtypeKeyword: assocKeyword,
+      unexpectedBeforeName,
+      name: name,
+      RawUnexpectedNodesSyntax([ellipsis], arena: self.arena),
+      inheritanceClause: inheritance,
+      initializer: defaultType,
+      genericWhereClause: whereClause,
+      arena: self.arena
+    )
+  }
+}
+
+extension Parser {
+  /// Parse an initializer declaration.
+  mutating func parseInitializerDeclaration(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle
+  ) -> RawInitializerDeclSyntax {
+    let (unexpectedBeforeInitKeyword, initKeyword) = self.eat(handle)
+
+    // Parse the '!' or '?' for a failable initializer.
+    let failable: RawTokenSyntax?
+    if let parsedFailable = self.consume(
+      if: .exclamationMark,
+      .postfixQuestionMark,
+      TokenSpec(.infixQuestionMark, remapping: .postfixQuestionMark)
+    ) {
+      failable = parsedFailable
+    } else if let parsedFailable = self.consumeIfContextualPunctuator("!", remapping: .exclamationMark) {
+      failable = parsedFailable
+    } else {
+      failable = nil
+    }
+
+    let generics: RawGenericParameterClauseSyntax?
+    if self.at(prefix: "<") {
+      generics = self.parseGenericParameters()
+    } else {
+      generics = nil
+    }
+
+    // Parse the signature.
+    let signature = self.parseFunctionSignature()
+
+    let whereClause: RawGenericWhereClauseSyntax?
+    if self.at(.keyword(.where)) {
+      whereClause = self.parseGenericWhereClause()
+    } else {
+      whereClause = nil
+    }
+
+    let items = self.parseOptionalCodeBlock(allowInitDecl: false)
+
+    return RawInitializerDeclSyntax(
+      attributes: attrs.attributes,
+      modifiers: attrs.modifiers,
+      unexpectedBeforeInitKeyword,
+      initKeyword: initKeyword,
+      optionalMark: failable,
+      genericParameterClause: generics,
+      signature: signature,
+      genericWhereClause: whereClause,
+      body: items,
+      arena: self.arena
+    )
+  }
+
+  /// Parse a deinitializer declaration.
+  mutating func parseDeinitializerDeclaration(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle
+  ) -> RawDeinitializerDeclSyntax {
+    let (unexpectedBeforeDeinitKeyword, deinitKeyword) = self.eat(handle)
+
+    var unexpectedNameAndSignature: [RawSyntax?] = []
+
+    // async is a contextual keyword
+    // must be parsed before attempting to parse identifier
+    var effectSpecifiers = parseDeinitEffectSpecifiers()
+
+    if effectSpecifiers == nil {
+      if let identifier = self.consume(if: TokenSpec(.identifier, allowAtStartOfLine: false)).map(RawSyntax.init) {
+        unexpectedNameAndSignature.append(identifier)
+      }
+      effectSpecifiers = parseDeinitEffectSpecifiers()
+    }
+    if effectSpecifiers == nil && self.at(TokenSpec(.leftParen, allowAtStartOfLine: false)) {
+      let input = parseParameterClause(RawFunctionParameterClauseSyntax.self) { parser in
+        parser.parseFunctionParameter()
+      }
+      unexpectedNameAndSignature.append(RawSyntax(input))
+
+      effectSpecifiers = parseDeinitEffectSpecifiers()
+    }
+
+    var unexpectedAfterAsync: [RawSyntax?] = []
+    /// Only allow recovery to the arrow with exprKeyword precedence so we only
+    /// skip over misplaced identifiers and don't e.g. recover to an arrow in a 'where' clause.
+    if self.canRecoverTo(TokenSpec(.arrow, recoveryPrecedence: .exprKeyword)) != nil {
+      let output = self.parseFunctionReturnClause(effectSpecifiers: &effectSpecifiers, allowNamedOpaqueResultType: true)
+      unexpectedAfterAsync.append(RawSyntax(output))
+    }
+
+    let items = self.parseOptionalCodeBlock()
+    return RawDeinitializerDeclSyntax(
+      attributes: attrs.attributes,
+      modifiers: attrs.modifiers,
+      unexpectedBeforeDeinitKeyword,
+      deinitKeyword: deinitKeyword,
+      RawUnexpectedNodesSyntax(unexpectedNameAndSignature, arena: self.arena),
+      effectSpecifiers: effectSpecifiers,
+      RawUnexpectedNodesSyntax(unexpectedAfterAsync, arena: arena),
+      body: items,
+      arena: self.arena
+    )
+  }
+}
+
+extension Parser {
+  /// If a `throws` keyword appears right in front of the `arrow`, it is returned as `misplacedThrowsKeyword` so it can be synthesized in front of the arrow.
+  mutating func parseFunctionReturnClause(
+    effectSpecifiers: inout (some RawMisplacedEffectSpecifiersTrait)?,
+    allowNamedOpaqueResultType: Bool
+  ) -> RawReturnClauseSyntax {
+    let (unexpectedBeforeArrow, arrow) = self.expect(.arrow)
+    let unexpectedBeforeReturnType = self.parseMisplacedEffectSpecifiers(&effectSpecifiers)
+    let type: RawTypeSyntax
+    if allowNamedOpaqueResultType {
+      type = self.parseResultType()
+    } else {
+      type = self.parseType()
+    }
+    let unexpectedAfterReturnType = self.parseMisplacedEffectSpecifiers(&effectSpecifiers)
+    let returnClause = RawReturnClauseSyntax(
+      unexpectedBeforeArrow,
+      arrow: arrow,
+      unexpectedBeforeReturnType,
+      type: type,
+      unexpectedAfterReturnType,
+      arena: self.arena
+    )
+    return returnClause
+  }
+}
+
+extension Parser {
+  mutating func parseFuncDeclaration(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle
+  ) -> RawFunctionDeclSyntax {
+    let (unexpectedBeforeFuncKeyword, funcKeyword) = self.eat(handle)
+    let unexpectedBeforeIdentifier: RawUnexpectedNodesSyntax?
+    let unexpectedAfterIdentifier: RawUnexpectedNodesSyntax?
+    let identifier: RawTokenSyntax
+    if self.at(anyIn: Operator.self) != nil || self.at(.exclamationMark, .prefixAmpersand) {
+      // If the name is an operator token that ends in '<' followed by an identifier or 'let',
+      // leave the '<' so it's parsed as a generic parameter clause. This allows things like
+      // 'func ==<T>(x:T, y:T) {}'.
+      var name = self.currentToken.tokenText
+      if !currentToken.isEditorPlaceholder && name.hasSuffix("<") && self.peek(isAt: .identifier, .keyword(.let)) {
+        name = SyntaxText(rebasing: name.dropLast())
+      }
+      unexpectedBeforeIdentifier = nil
+      identifier = self.consumePrefix(name, as: .binaryOperator)
+      unexpectedAfterIdentifier = nil
+    } else {
+      (unexpectedBeforeIdentifier, identifier) = self.expectIdentifier(keywordRecovery: true)
+
+      if currentToken.isEditorPlaceholder {
+        let editorPlaceholder = self.parseAnyIdentifier()
+        unexpectedAfterIdentifier = RawUnexpectedNodesSyntax([editorPlaceholder], arena: self.arena)
+      } else {
+        unexpectedAfterIdentifier = nil
+      }
+    }
+
+    let genericParams: RawGenericParameterClauseSyntax?
+    if self.at(prefix: "<") {
+      genericParams = self.parseGenericParameters()
+    } else {
+      genericParams = nil
+    }
+
+    let signature = self.parseFunctionSignature()
+
+    let generics: RawGenericWhereClauseSyntax?
+    if self.at(.keyword(.where)) {
+      generics = self.parseGenericWhereClause()
+    } else {
+      generics = nil
+    }
+
+    let body = self.parseOptionalCodeBlock()
+    return RawFunctionDeclSyntax(
+      attributes: attrs.attributes,
+      modifiers: attrs.modifiers,
+      unexpectedBeforeFuncKeyword,
+      funcKeyword: funcKeyword,
+      unexpectedBeforeIdentifier,
+      name: identifier,
+      unexpectedAfterIdentifier,
+      genericParameterClause: genericParams,
+      signature: signature,
+      genericWhereClause: generics,
+      body: body,
+      arena: self.arena
+    )
+  }
+
+  mutating func parseFunctionSignature() -> RawFunctionSignatureSyntax {
+    let parameterClause = self.parseParameterClause(RawFunctionParameterClauseSyntax.self) { parser in
+      parser.parseFunctionParameter()
+    }
+
+    var effectSpecifiers = self.parseFunctionEffectSpecifiers()
+
+    var returnClause: RawReturnClauseSyntax?
+
+    /// Only allow recovery to the arrow with exprKeyword precedence so we only
+    /// skip over misplaced identifiers and don't e.g. recover to an arrow in a 'where' clause.
+    if self.canRecoverTo(TokenSpec(.arrow, recoveryPrecedence: .exprKeyword)) != nil {
+      returnClause = self.parseFunctionReturnClause(
+        effectSpecifiers: &effectSpecifiers,
+        allowNamedOpaqueResultType: true
+      )
+    } else {
+      returnClause = nil
+    }
+
+    return RawFunctionSignatureSyntax(
+      parameterClause: parameterClause,
+      effectSpecifiers: effectSpecifiers,
+      returnClause: returnClause,
+      arena: self.arena
+    )
+  }
+}
+
+extension Parser {
+  /// Parse a subscript declaration.
+  mutating func parseSubscriptDeclaration(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle
+  ) -> RawSubscriptDeclSyntax {
+    let (unexpectedBeforeSubscriptKeyword, subscriptKeyword) = self.eat(handle)
+
+    let unexpectedName: RawTokenSyntax?
+    if self.at(.identifier) && self.peek().tokenText.hasPrefix("<") || self.peek(isAt: .leftParen) {
+      unexpectedName = self.consumeAnyToken()
+    } else {
+      unexpectedName = nil
+    }
+
+    let genericParameterClause: RawGenericParameterClauseSyntax?
+    if self.at(prefix: "<") {
+      genericParameterClause = self.parseGenericParameters()
+    } else {
+      genericParameterClause = nil
+    }
+
+    let parameterClause = self.parseParameterClause(RawFunctionParameterClauseSyntax.self) { parser in
+      parser.parseFunctionParameter()
+    }
+
+    var misplacedEffectSpecifiers: RawFunctionEffectSpecifiersSyntax?
+    let returnClause = self.parseFunctionReturnClause(
+      effectSpecifiers: &misplacedEffectSpecifiers,
+      allowNamedOpaqueResultType: true
+    )
+
+    // Parse a 'where' clause if present.
+    let genericWhereClause: RawGenericWhereClauseSyntax?
+    if self.at(.keyword(.where)) {
+      genericWhereClause = self.parseGenericWhereClause()
+    } else {
+      genericWhereClause = nil
+    }
+
+    // Parse getter and setter.
+    let accessor: RawAccessorBlockSyntax?
+    if self.at(.leftBrace) || self.at(anyIn: AccessorDeclSyntax.AccessorSpecifierOptions.self) != nil {
+      accessor = self.parseAccessorBlock()
+    } else {
+      accessor = nil
+    }
+
+    return RawSubscriptDeclSyntax(
+      attributes: attrs.attributes,
+      modifiers: attrs.modifiers,
+      unexpectedBeforeSubscriptKeyword,
+      subscriptKeyword: subscriptKeyword,
+      RawUnexpectedNodesSyntax([unexpectedName], arena: self.arena),
+      genericParameterClause: genericParameterClause,
+      parameterClause: parameterClause,
+      returnClause: returnClause,
+      genericWhereClause: genericWhereClause,
+      accessorBlock: accessor,
+      arena: self.arena
+    )
+  }
+}
+
+extension Parser {
+  /// Parse a variable declaration starting with a leading 'let' or 'var' keyword.
+  ///
+  /// If `inMemberDeclList` is `true`, we know that the next item needs to be a
+  /// declaration that is started by a keyword. Thus, we in the following case
+  /// we know that `set` can't start a new declaration and we can thus recover
+  /// by synthesizing a missing `{` in front of `set`.
+  /// ```
+  /// var x: Int
+  ///   set {
+  ///   }
+  /// }
+  /// ```
+  mutating func parseBindingDeclaration(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle,
+    in context: DeclarationParseContext
+  ) -> RawVariableDeclSyntax {
+    let (unexpectedBeforeIntroducer, introducer) = self.eat(handle)
+    let hasTryBeforeIntroducer = unexpectedBeforeIntroducer?.containsToken(where: { TokenSpec(.try) ~= $0 }) ?? false
+
+    var attrs = attrs
+    var elements = [RawPatternBindingSyntax]()
+    do {
+      var keepGoing: RawTokenSyntax? = nil
+      var loopProgress = LoopProgressCondition()
+      repeat {
+        var unexpectedBeforePattern: RawUnexpectedNodesSyntax?
+
+        if self.at(.atSign), attrs.attributes.isEmpty {
+          let recoveredAttributes = self.parseAttributeList()
+          unexpectedBeforePattern = RawUnexpectedNodesSyntax(
+            [recoveredAttributes],
+            arena: self.arena
+          )
+
+          attrs.attributes = withAllTokensMarkedMissing(syntax: recoveredAttributes)
+        }
+
+        var (pattern, typeAnnotation) = self.parseTypedPattern()
+
+        // Parse an initializer if present.
+        let initializer: RawInitializerClauseSyntax?
+        if let equal = self.consume(if: .equal) {
+          var value = self.parseExpression(flavor: .basic, pattern: .none)
+          if hasTryBeforeIntroducer && !value.is(RawTryExprSyntax.self) {
+            value = RawExprSyntax(
+              RawTryExprSyntax(
+                tryKeyword: missingToken(.try),
+                questionOrExclamationMark: nil,
+                expression: value,
+                arena: self.arena
+              )
+            )
+          }
+          initializer = RawInitializerClauseSyntax(
+            equal: equal,
+            value: value,
+            arena: self.arena
+          )
+        } else if self.at(TokenSpec(.leftParen, allowAtStartOfLine: false)),
+          let typeAnnotationUnwrapped = typeAnnotation
+        {
+          // If we have a '(' after the type in the annotation, the type annotation
+          // is probably a constructor call. Rewrite the nodes to remove the type
+          // annotation and form an initializer clause from it instead.
+          typeAnnotation = nil
+          let initExpr = parsePostfixExpressionSuffix(
+            RawExprSyntax(
+              RawTypeExprSyntax(
+                type: typeAnnotationUnwrapped.type,
+                typeAnnotation?.unexpectedAfterType,
+                arena: self.arena
+              )
+            ),
+            flavor: .basic,
+            pattern: .none
+          )
+          initializer = RawInitializerClauseSyntax(
+            RawUnexpectedNodesSyntax(
+              combining:
+                typeAnnotationUnwrapped.unexpectedBeforeColon,
+              typeAnnotationUnwrapped.colon,
+              typeAnnotationUnwrapped.unexpectedBetweenColonAndType,
+              arena: self.arena
+            ),
+            equal: missingToken(.equal),
+            value: initExpr,
+            arena: self.arena
+          )
+        } else if self.atStartOfExpression(), !self.at(.leftBrace), !self.atStartOfLine {
+          let missingEqual = RawTokenSyntax(missing: .equal, arena: self.arena)
+          let expr = self.parseExpression(flavor: .basic, pattern: .none)
+          initializer = RawInitializerClauseSyntax(
+            equal: missingEqual,
+            value: expr,
+            arena: self.arena
+          )
+        } else {
+          initializer = nil
+        }
+
+        let accessors: RawAccessorBlockSyntax?
+        if (self.at(.leftBrace)
+          && (initializer == nil || !self.currentToken.isAtStartOfLine
+            || self.withLookahead({ $0.atStartOfGetSetAccessor() })))
+          || (context.requiresDecl && self.at(anyIn: AccessorDeclSyntax.AccessorSpecifierOptions.self) != nil
+            && !self.at(.keyword(.`init`)))
+        {
+          accessors = self.parseAccessorBlock()
+        } else {
+          accessors = nil
+        }
+
+        keepGoing = self.consume(if: .comma)
+        elements.append(
+          RawPatternBindingSyntax(
+            unexpectedBeforePattern,
+            pattern: pattern,
+            typeAnnotation: typeAnnotation,
+            initializer: initializer,
+            accessorBlock: accessors,
+            trailingComma: keepGoing,
+            arena: self.arena
+          )
+        )
+      } while keepGoing != nil && self.hasProgressed(&loopProgress)
+    }
+
+    return RawVariableDeclSyntax(
+      attributes: attrs.attributes,
+      modifiers: attrs.modifiers,
+      unexpectedBeforeIntroducer,
+      bindingSpecifier: introducer,
+      bindings: RawPatternBindingListSyntax(elements: elements, arena: self.arena),
+      arena: self.arena
+    )
+  }
+
+  struct AccessorIntroducer {
+    var attributes: RawAttributeListSyntax
+    var modifier: RawDeclModifierSyntax?
+    var kind: AccessorDeclSyntax.AccessorSpecifierOptions
+    var unexpectedBeforeToken: RawUnexpectedNodesSyntax?
+    var token: RawTokenSyntax
+  }
+
+  mutating func parseAccessorIntroducer(
+    forcedKind: (AccessorDeclSyntax.AccessorSpecifierOptions, TokenConsumptionHandle)? = nil
+  ) -> AccessorIntroducer? {
+    // Check there is an identifier before consuming
+    var look = self.lookahead()
+    let _ = look.consumeAttributeList()
+    let hasModifier = look.consume(ifAnyIn: AccessorModifier.self) != nil
+    guard let (kind, _) = look.at(anyIn: AccessorDeclSyntax.AccessorSpecifierOptions.self) ?? forcedKind else {
+      return nil
+    }
+
+    let attrs = self.parseAttributeList()
+
+    // Parse the contextual keywords for 'mutating' and 'nonmutating' before
+    // get and set.
+    let modifier: RawDeclModifierSyntax?
+    if hasModifier {
+      let (unexpectedBeforeName, name) = self.expect(anyIn: AccessorModifier.self, default: .mutating)
+      modifier = RawDeclModifierSyntax(
+        unexpectedBeforeName,
+        name: name,
+        detail: nil,
+        arena: self.arena
+      )
+    } else {
+      modifier = nil
+    }
+
+    let (unexpectedBeforeIntroducer, introducer) = self.expect(kind.spec)
+    return AccessorIntroducer(
+      attributes: attrs,
+      modifier: modifier,
+      kind: kind,
+      unexpectedBeforeToken: unexpectedBeforeIntroducer,
+      token: introducer
+    )
+  }
+
+  /// Parse an accessor.
+  mutating func parseAccessorDecl() -> RawAccessorDeclSyntax {
+    let forcedHandle = TokenConsumptionHandle(spec: .keyword(.get), tokenIsMissing: true)
+    let introducer = parseAccessorIntroducer(forcedKind: (.get, forcedHandle))!
+    return parseAccessorDecl(introducer: introducer)
+  }
+
+  /// Parse an accessor once we know we have an introducer
+  mutating func parseAccessorDecl(
+    introducer: AccessorIntroducer
+  ) -> RawAccessorDeclSyntax {
+    // 'set' and 'willSet' can have an optional name.  This isn't valid in a
+    // protocol, but we parse and then reject it for better QoI.
+    let parameters: RawAccessorParametersSyntax?
+    if [AccessorDeclSyntax.AccessorSpecifierOptions.set, .willSet, .didSet, .`init`].contains(introducer.kind),
+      let lparen = self.consume(if: .leftParen)
+    {
+      let (unexpectedBeforeName, name) = self.expectIdentifier()
+      let (unexpectedBeforeRParen, rparen) = self.expect(.rightParen)
+      parameters = RawAccessorParametersSyntax(
+        leftParen: lparen,
+        unexpectedBeforeName,
+        name: name,
+        unexpectedBeforeRParen,
+        rightParen: rparen,
+        arena: self.arena
+      )
+    } else {
+      parameters = nil
+    }
+
+    let effectSpecifiers = self.parseAccessorEffectSpecifiers()
+
+    let body = self.parseOptionalCodeBlock()
+    return RawAccessorDeclSyntax(
+      attributes: introducer.attributes,
+      modifier: introducer.modifier,
+      introducer.unexpectedBeforeToken,
+      accessorSpecifier: introducer.token,
+      parameters: parameters,
+      effectSpecifiers: effectSpecifiers,
+      body: body,
+      arena: self.arena
+    )
+  }
+
+  mutating func parseAccessorList() -> RawAccessorDeclListSyntax? {
+    // Collect all explicit accessors to a list.
+    var elements = [RawAccessorDeclSyntax]()
+    do {
+      var loopProgress = LoopProgressCondition()
+      while !self.at(.endOfFile, .rightBrace) && self.hasProgressed(&loopProgress) {
+        guard let introducer = self.parseAccessorIntroducer() else {
+          break
+        }
+
+        elements.append(parseAccessorDecl(introducer: introducer))
+      }
+    }
+    if elements.isEmpty {
+      return nil
+    } else {
+      return RawAccessorDeclListSyntax(elements: elements, arena: self.arena)
+    }
+  }
+
+  /// Parse the body of a variable declaration. This can include explicit
+  /// getters, setters, and observers, or the body of a computed property.
+  mutating func parseAccessorBlock() -> RawAccessorBlockSyntax {
+    // Parse getter and setter.
+    let unexpectedBeforeLBrace: RawUnexpectedNodesSyntax?
+    let lbrace: RawTokenSyntax
+    if self.at(anyIn: AccessorDeclSyntax.AccessorSpecifierOptions.self) != nil {
+      unexpectedBeforeLBrace = nil
+      lbrace = missingToken(.leftBrace)
+    } else {
+      (unexpectedBeforeLBrace, lbrace) = self.expect(.leftBrace)
+    }
+
+    let accessorList = parseAccessorList()
+
+    // There can only be an implicit getter if no other accessors were
+    // seen before this one.
+    guard let accessorList else {
+      let body = parseCodeBlockItemList()
+
+      let (unexpectedBeforeRBrace, rbrace) = self.expect(.rightBrace)
+      return RawAccessorBlockSyntax(
+        unexpectedBeforeLBrace,
+        leftBrace: lbrace,
+        accessors: .getter(body),
+        unexpectedBeforeRBrace,
+        rightBrace: rbrace,
+        arena: self.arena
+      )
+    }
+
+    let (unexpectedBeforeRBrace, rbrace) = self.expect(.rightBrace)
+    return RawAccessorBlockSyntax(
+      unexpectedBeforeLBrace,
+      leftBrace: lbrace,
+      accessors: .accessors(accessorList),
+      unexpectedBeforeRBrace,
+      rightBrace: rbrace,
+      arena: self.arena
+    )
+  }
+}
+
+extension Parser {
+  /// Parse a typealias declaration.
+  mutating func parseTypealiasDeclaration(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle
+  ) -> RawTypeAliasDeclSyntax {
+    let (unexpectedBeforeTypealiasKeyword, typealiasKeyword) = self.eat(handle)
+    let (unexpectedBeforeName, name) = self.expectIdentifier(keywordRecovery: true)
+
+    // Parse a generic parameter list if it is present.
+    let generics: RawGenericParameterClauseSyntax?
+    if self.at(prefix: "<") {
+      generics = self.parseGenericParameters()
+    } else {
+      generics = nil
+    }
+
+    // Parse the binding alias.
+    let unexpectedBeforeEqual: RawUnexpectedNodesSyntax?
+    let equal: RawTokenSyntax
+    if let colon = self.consume(if: .colon) {
+      unexpectedBeforeEqual = RawUnexpectedNodesSyntax([colon], arena: self.arena)
+      equal = missingToken(.equal)
+    } else {
+      (unexpectedBeforeEqual, equal) = self.expect(.equal)
+    }
+    let value = self.parseType()
+    let initializer = RawTypeInitializerClauseSyntax(
+      unexpectedBeforeEqual,
+      equal: equal,
+      value: value,
+      arena: self.arena
+    )
+
+    // Parse a 'where' clause if present.
+    let genericWhereClause: RawGenericWhereClauseSyntax?
+    if self.at(.keyword(.where)) {
+      genericWhereClause = self.parseGenericWhereClause()
+    } else {
+      genericWhereClause = nil
+    }
+
+    return RawTypeAliasDeclSyntax(
+      attributes: attrs.attributes,
+      modifiers: attrs.modifiers,
+      unexpectedBeforeTypealiasKeyword,
+      typealiasKeyword: typealiasKeyword,
+      unexpectedBeforeName,
+      name: name,
+      genericParameterClause: generics,
+      initializer: initializer,
+      genericWhereClause: genericWhereClause,
+      arena: self.arena
+    )
+  }
+}
+
+extension Parser {
+  struct OperatorDeclIntroducer {
+    var unexpectedBeforeFixity: RawUnexpectedNodesSyntax?
+    var fixity: RawTokenSyntax
+    var unexpectedBeforeOperatorKeyword: RawUnexpectedNodesSyntax?
+    var operatorKeyword: RawTokenSyntax
+  }
+
+  /// Parse an operator declaration.
+  mutating func parseOperatorDeclIntroducer(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle
+  ) -> OperatorDeclIntroducer {
+    func isFixity(_ modifier: RawDeclModifierSyntax) -> Bool {
+      switch modifier.name {
+      case .keyword(.prefix),
+        .keyword(.infix),
+        .keyword(.postfix):
+        return true
+      default:
+        return false
+      }
+    }
+
+    var unexpectedBeforeFixity = RawUnexpectedNodesSyntax(attrs.attributes.elements, arena: self.arena)
+
+    var fixity: RawTokenSyntax?
+    var unexpectedAfterFixity: RawUnexpectedNodesSyntax?
+
+    let modifiers = attrs.modifiers.elements
+    if let firstFixityIndex = modifiers.firstIndex(where: { isFixity($0) }) {
+      let fixityModifier = modifiers[firstFixityIndex]
+      fixity = fixityModifier.name
+
+      unexpectedBeforeFixity = RawUnexpectedNodesSyntax(
+        combining: unexpectedBeforeFixity,
+        RawUnexpectedNodesSyntax(Array(modifiers[0..<firstFixityIndex]), arena: self.arena),
+        fixityModifier.unexpectedBeforeName,
+        arena: self.arena
+      )
+
+      unexpectedAfterFixity = RawUnexpectedNodesSyntax(
+        combining: fixityModifier.unexpectedBetweenNameAndDetail,
+        RawUnexpectedNodesSyntax([fixityModifier.detail], arena: self.arena),
+        fixityModifier.unexpectedAfterDetail,
+        RawUnexpectedNodesSyntax(Array(modifiers[modifiers.index(after: firstFixityIndex)...]), arena: self.arena),
+        arena: self.arena
+      )
+
+    } else {
+      unexpectedBeforeFixity = RawUnexpectedNodesSyntax(
+        combining: unexpectedBeforeFixity,
+        RawUnexpectedNodesSyntax(modifiers, arena: self.arena),
+        arena: self.arena
+      )
+    }
+
+    var (unexpectedBeforeOperatorKeyword, operatorKeyword) = self.expect(.keyword(.operator))
+
+    unexpectedBeforeOperatorKeyword = RawUnexpectedNodesSyntax(
+      combining: unexpectedAfterFixity,
+      unexpectedBeforeOperatorKeyword,
+      arena: self.arena
+    )
+
+    return OperatorDeclIntroducer(
+      unexpectedBeforeFixity: unexpectedBeforeFixity,
+      fixity: fixity ?? self.missingToken(.prefix),
+      unexpectedBeforeOperatorKeyword: unexpectedBeforeOperatorKeyword,
+      operatorKeyword: operatorKeyword
+    )
+  }
+
+  mutating func parseOperatorDeclaration(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle
+  ) -> RawOperatorDeclSyntax {
+    let introducer = parseOperatorDeclIntroducer(attrs, handle)
+
+    let unexpectedBeforeName: RawUnexpectedNodesSyntax?
+    let name: RawTokenSyntax
+    switch self.canRecoverTo(anyIn: OperatorLike.self) {
+    case (_, let handle)?:
+      (unexpectedBeforeName, name) = self.eat(handle)
+    default:
+      if let identifier = self.consume(
+        if: TokenSpec(.identifier, allowAtStartOfLine: false),
+        TokenSpec(.dollarIdentifier, allowAtStartOfLine: false)
+      ) {
+        // Recover if the developer tried to use an identifier as the operator name
+        unexpectedBeforeName = RawUnexpectedNodesSyntax([identifier], arena: self.arena)
+      } else {
+        unexpectedBeforeName = nil
+      }
+      name = missingToken(.binaryOperator)
+    }
+
+    // Eat any subsequent tokens that are not separated to the operator by trivia.
+    // The developer most likely intended these to be part of the operator name.
+    var identifiersAfterOperatorName: [RawTokenSyntax] = []
+    var loopProgress = LoopProgressCondition()
+    while (identifiersAfterOperatorName.last ?? name).trailingTriviaByteLength == 0,
+      self.currentToken.leadingTriviaByteLength == 0,
+      !self.at(.colon, .leftBrace, .endOfFile),
+      self.hasProgressed(&loopProgress)
+    {
+      identifiersAfterOperatorName.append(consumeAnyToken())
+    }
+
+    // Parse (or diagnose) a specified precedence group and/or
+    // designated protocol. These both look like identifiers, so we
+    // parse them both as identifiers here and sort it out in type
+    // checking.
+    let precedenceAndTypes: RawOperatorPrecedenceAndTypesSyntax?
+    if let colon = self.consume(if: .colon) {
+      let (unexpectedBeforeIdentifier, identifier) = self.expectIdentifier(allowSelfOrCapitalSelfAsIdentifier: true)
+      var types = [RawDesignatedTypeSyntax]()
+      while let comma = self.consume(if: .comma) {
+        // Technically, we should only accept identifiers for the designated
+        // types but the C++ parser accepted anything, which we mimick.
+        // It's not worth fixing since designated types are no longer allowed
+        // anyway.
+        let designatedType = self.consumeAnyToken()
+        types.append(
+          RawDesignatedTypeSyntax(
+            leadingComma: comma,
+            name: designatedType,
+            arena: self.arena
+          )
+        )
+      }
+      precedenceAndTypes = RawOperatorPrecedenceAndTypesSyntax(
+        colon: colon,
+        unexpectedBeforeIdentifier,
+        precedenceGroup: identifier,
+        designatedTypes: RawDesignatedTypeListSyntax(
+          elements: types,
+          arena: self.arena
+        ),
+        arena: self.arena
+      )
+    } else {
+      precedenceAndTypes = nil
+    }
+    let unexpectedAtEnd: RawUnexpectedNodesSyntax?
+    if let leftBrace = self.consume(if: .leftBrace) {
+      let attributeList = self.parsePrecedenceGroupAttributeListSyntax()
+      let rightBrace = self.consume(if: .rightBrace)
+      unexpectedAtEnd = RawUnexpectedNodesSyntax(
+        elements: [
+          RawSyntax(leftBrace),
+          RawSyntax(attributeList),
+          rightBrace.map(RawSyntax.init),
+        ].compactMap({ $0 }),
+        arena: self.arena
+      )
+    } else {
+      unexpectedAtEnd = nil
+    }
+    return RawOperatorDeclSyntax(
+      introducer.unexpectedBeforeFixity,
+      fixitySpecifier: introducer.fixity,
+      introducer.unexpectedBeforeOperatorKeyword,
+      operatorKeyword: introducer.operatorKeyword,
+      unexpectedBeforeName,
+      name: name,
+      RawUnexpectedNodesSyntax(identifiersAfterOperatorName, arena: self.arena),
+      operatorPrecedenceAndTypes: precedenceAndTypes,
+      unexpectedAtEnd,
+      arena: self.arena
+    )
+  }
+
+  /// Parse a precedence group declaration.
+  mutating func parsePrecedenceGroupDeclaration(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle
+  ) -> RawPrecedenceGroupDeclSyntax {
+    let (unexpectedBeforeGroup, group) = self.eat(handle)
+    let (unexpectedBeforeName, name) = self.expectIdentifier(allowSelfOrCapitalSelfAsIdentifier: true)
+    let (unexpectedBeforeLBrace, lbrace) = self.expect(.leftBrace)
+
+    let groupAttributes = self.parsePrecedenceGroupAttributeListSyntax()
+
+    let (unexpectedBeforeRBrace, rbrace) = self.expect(.rightBrace)
+    return RawPrecedenceGroupDeclSyntax(
+      attributes: attrs.attributes,
+      modifiers: attrs.modifiers,
+      unexpectedBeforeGroup,
+      precedencegroupKeyword: group,
+      unexpectedBeforeName,
+      name: name,
+      unexpectedBeforeLBrace,
+      leftBrace: lbrace,
+      groupAttributes: groupAttributes,
+      unexpectedBeforeRBrace,
+      rightBrace: rbrace,
+      arena: self.arena
+    )
+  }
+
+  mutating func parsePrecedenceGroupAttributeListSyntax() -> RawPrecedenceGroupAttributeListSyntax {
+    enum LabelText: TokenSpecSet {
+      case associativity
+      case assignment
+      case higherThan
+      case lowerThan
+
+      init?(lexeme: Lexer.Lexeme, experimentalFeatures: Parser.ExperimentalFeatures) {
+        switch PrepareForKeywordMatch(lexeme) {
+        case TokenSpec(.associativity): self = .associativity
+        case TokenSpec(.assignment): self = .assignment
+        case TokenSpec(.higherThan): self = .higherThan
+        case TokenSpec(.lowerThan): self = .lowerThan
+        default: return nil
+        }
+      }
+
+      var spec: TokenSpec {
+        switch self {
+        case .associativity: return .keyword(.associativity)
+        case .assignment: return .keyword(.assignment)
+        case .higherThan: return .keyword(.higherThan)
+        case .lowerThan: return .keyword(.lowerThan)
+        }
+      }
+    }
+
+    var elements = [RawPrecedenceGroupAttributeListSyntax.Element]()
+    do {
+      var attributesProgress = LoopProgressCondition()
+      LOOP: while !self.at(.endOfFile, .rightBrace) && self.hasProgressed(&attributesProgress) {
+        switch self.at(anyIn: LabelText.self) {
+        case (.associativity, let handle)?:
+          let associativity = self.eat(handle)
+          let (unexpectedBeforeColon, colon) = self.expect(.colon)
+          var (unexpectedBeforeValue, value) = self.expect(
+            .keyword(.left),
+            .keyword(.right),
+            .keyword(.none),
+            default: .keyword(.none)
+          )
+          if value.isMissing, let identifier = self.consume(if: .identifier) {
+            unexpectedBeforeValue = RawUnexpectedNodesSyntax(
+              combining: unexpectedBeforeValue,
+              identifier,
+              arena: self.arena
+            )
+          }
+          elements.append(
+            .precedenceGroupAssociativity(
+              RawPrecedenceGroupAssociativitySyntax(
+                associativityLabel: associativity,
+                unexpectedBeforeColon,
+                colon: colon,
+                unexpectedBeforeValue,
+                value: value,
+                arena: self.arena
+              )
+            )
+          )
+        case (.assignment, let handle)?:
+          let assignmentKeyword = self.eat(handle)
+          let (unexpectedBeforeColon, colon) = self.expect(.colon)
+          let (unexpectedBeforeValue, value) = self.expect(
+            anyIn: PrecedenceGroupAssignmentSyntax.ValueOptions.self,
+            default: .true
+          )
+          let unexpectedAfterFlag: RawUnexpectedNodesSyntax?
+          if value.isMissing,
+            let unexpectedIdentifier = self.consume(if: TokenSpec(.identifier, allowAtStartOfLine: false))
+          {
+            unexpectedAfterFlag = RawUnexpectedNodesSyntax([unexpectedIdentifier], arena: self.arena)
+          } else {
+            unexpectedAfterFlag = nil
+          }
+          elements.append(
+            .precedenceGroupAssignment(
+              RawPrecedenceGroupAssignmentSyntax(
+                assignmentLabel: assignmentKeyword,
+                unexpectedBeforeColon,
+                colon: colon,
+                unexpectedBeforeValue,
+                value: value,
+                unexpectedAfterFlag,
+                arena: self.arena
+              )
+            )
+          )
+        case (.higherThan, let handle)?,
+          (.lowerThan, let handle)?:
+          // "lowerThan" and "higherThan" are contextual keywords.
+          let level = self.eat(handle)
+          let (unexpectedBeforeColon, colon) = self.expect(.colon)
+          var names = [RawPrecedenceGroupNameSyntax]()
+          do {
+            var keepGoing: RawTokenSyntax? = nil
+            var namesProgress = LoopProgressCondition()
+            repeat {
+              let (unexpectedBeforeName, name) = self.expectIdentifier()
+              keepGoing = self.consume(if: .comma)
+              names.append(
+                RawPrecedenceGroupNameSyntax(
+                  unexpectedBeforeName,
+                  name: name,
+                  trailingComma: keepGoing,
+                  arena: self.arena
+                )
+              )
+            } while keepGoing != nil && self.hasProgressed(&namesProgress)
+          }
+          elements.append(
+            .precedenceGroupRelation(
+              RawPrecedenceGroupRelationSyntax(
+                higherThanOrLowerThanLabel: level,
+                unexpectedBeforeColon,
+                colon: colon,
+                precedenceGroups: RawPrecedenceGroupNameListSyntax(elements: names, arena: self.arena),
+                arena: self.arena
+              )
+            )
+          )
+        case nil:
+          break LOOP
+        }
+      }
+    }
+    return RawPrecedenceGroupAttributeListSyntax(elements: elements, arena: self.arena)
+  }
+}
+
+extension Parser {
+  /// Parse a macro declaration.
+  mutating func parseMacroDeclaration(
+    attrs: DeclAttributes,
+    introducerHandle: RecoveryConsumptionHandle
+  ) -> RawMacroDeclSyntax {
+    let (unexpectedBeforeIntroducerKeyword, introducerKeyword) = self.eat(introducerHandle)
+    let (unexpectedBeforeName, name) = self.expectIdentifier(keywordRecovery: true)
+
+    // Optional generic parameters.
+    let genericParams: RawGenericParameterClauseSyntax?
+    if self.at(prefix: "<") {
+      genericParams = self.parseGenericParameters()
+    } else {
+      genericParams = nil
+    }
+
+    // Macro signature, which is either value-like or function-like.
+    let signature = self.parseFunctionSignature()
+
+    // Initializer, if any.
+    let definition: RawInitializerClauseSyntax?
+    if let equal = self.consume(if: .equal) {
+      let expr = self.parseExpression(flavor: .basic, pattern: .none)
+      definition = RawInitializerClauseSyntax(
+        equal: equal,
+        value: expr,
+        arena: self.arena
+      )
+    } else {
+      definition = nil
+    }
+
+    // Parse a 'where' clause if present.
+    let whereClause: RawGenericWhereClauseSyntax?
+    if self.at(.keyword(.where)) {
+      whereClause = self.parseGenericWhereClause()
+    } else {
+      whereClause = nil
+    }
+
+    return RawMacroDeclSyntax(
+      attributes: attrs.attributes,
+      modifiers: attrs.modifiers,
+      unexpectedBeforeIntroducerKeyword,
+      macroKeyword: introducerKeyword,
+      unexpectedBeforeName,
+      name: name,
+      genericParameterClause: genericParams,
+      signature: signature,
+      definition: definition,
+      genericWhereClause: whereClause,
+      arena: self.arena
+    )
+  }
+
+  /// Parse a macro expansion as a declaration.
+  mutating func parseMacroExpansionDeclaration(
+    _ attrs: DeclAttributes,
+    _ handle: RecoveryConsumptionHandle
+  ) -> RawMacroExpansionDeclSyntax {
+
+    var (unexpectedBeforePound, pound) = self.eat(handle)
+    if pound.trailingTriviaByteLength > 0 || currentToken.leadingTriviaByteLength > 0 {
+      // If there are whitespaces after '#' diagnose.
+      let diagnostic = TokenDiagnostic(
+        .extraneousTrailingWhitespaceError,
+        byteOffset: pound.leadingTriviaByteLength + pound.tokenText.count
+      )
+      pound = pound.tokenView.withTokenDiagnostic(tokenDiagnostic: diagnostic, arena: self.arena)
+    }
+
+    let moduleSelector: RawModuleSelectorSyntax?
+    if !self.atStartOfLine {
+      (moduleSelector, _) = self.parseModuleSelectorIfPresent()
+    } else {
+      moduleSelector = nil
+    }
+
+    let unexpectedBeforeMacro: RawUnexpectedNodesSyntax?
+    let macro: RawTokenSyntax
+    if !self.atStartOfLine {
+      (unexpectedBeforeMacro, macro) = self.expectIdentifier(allowKeywordsAsIdentifier: true)
+    } else {
+      unexpectedBeforeMacro = nil
+      macro = self.missingToken(.identifier)
+    }
+
+    // Parse the optional generic argument list.
+    let generics: RawGenericArgumentClauseSyntax?
+    if self.withLookahead({ $0.canParseAsGenericArgumentList() }) {
+      generics = self.parseGenericArguments()
+    } else {
+      generics = nil
+    }
+
+    // Parse the optional parenthesized argument list.
+    let leftParen = self.consume(if: TokenSpec(.leftParen, allowAtStartOfLine: false))
+    let args: [RawLabeledExprSyntax]
+    let unexpectedBeforeRightParen: RawUnexpectedNodesSyntax?
+    let rightParen: RawTokenSyntax?
+    if leftParen != nil {
+      args = parseArgumentListElements(
+        pattern: .none,
+        allowTrailingComma: true
+      )
+      (unexpectedBeforeRightParen, rightParen) = self.expect(.rightParen)
+    } else {
+      args = []
+      unexpectedBeforeRightParen = nil
+      rightParen = nil
+    }
+
+    // Parse the optional trailing closures.
+    let trailingClosure: RawClosureExprSyntax?
+    let additionalTrailingClosures: RawMultipleTrailingClosureElementListSyntax
+    if self.at(.leftBrace),
+      self.withLookahead({ $0.atValidTrailingClosure(flavor: .basic) })
+    {
+      (trailingClosure, additionalTrailingClosures) =
+        self.parseTrailingClosures(flavor: .basic)
+    } else {
+      trailingClosure = nil
+      additionalTrailingClosures = self.emptyCollection(RawMultipleTrailingClosureElementListSyntax.self)
+    }
+
+    return RawMacroExpansionDeclSyntax(
+      attributes: attrs.attributes,
+      modifiers: attrs.modifiers,
+      unexpectedBeforePound,
+      pound: pound,
+      moduleSelector: moduleSelector,
+      unexpectedBeforeMacro,
+      macroName: macro,
+      genericArgumentClause: generics,
+      leftParen: leftParen,
+      arguments: RawLabeledExprListSyntax(
+        elements: args,
+        arena: self.arena
+      ),
+      unexpectedBeforeRightParen,
+      rightParen: rightParen,
+      trailingClosure: trailingClosure,
+      additionalTrailingClosures: additionalTrailingClosures,
+      arena: self.arena
+    )
+  }
+
+  /// Eats tokens until a start of decl, statement, or expression.
+  /// Returns consumed tokens as a `RawUnexpectedCodeDeclSyntax` declaration.
+  mutating func parseUnexpectedCodeDeclaration(
+    allowInitDecl: Bool,
+    requiresDecl: Bool,
+    until stopCondition: (inout Parser) -> Bool
+  ) -> RawUnexpectedCodeDeclSyntax {
+    var unexpectedTokens = [RawSyntax]()
+    var loopProgress = LoopProgressCondition()
+    while !self.at(.endOfFile, .semicolon), !stopCondition(&self), self.hasProgressed(&loopProgress) {
+      let numTokensToSkip = self.withLookahead {
+        $0.skipSingle()
+        return $0.tokensConsumed
+      }
+      for _ in 0..<numTokensToSkip {
+        unexpectedTokens.append(RawSyntax(self.consumeAnyTokenWithoutAdjustingNestingLevel()))
+      }
+
+      if self.at(.poundIf) {
+        break
+      }
+      if self.at(.poundSourceLocation) {
+        break
+      }
+      if self.atStartOfDeclaration(allowInitDecl: allowInitDecl, requiresDecl: requiresDecl) {
+        break
+      }
+
+      // If a declaration is expected, ignore statements and expressions.
+      if requiresDecl {
+        continue
+      }
+      if self.atStartOfStatement(preferExpr: false) {
+        break
+      }
+      // Recover to an expression only if it's on a new line.
+      if self.currentToken.isAtStartOfLine && self.atStartOfExpression() {
+        break
+      }
+    }
+    return RawUnexpectedCodeDeclSyntax(
+      unexpectedCode: RawUnexpectedNodesSyntax(elements: unexpectedTokens, arena: self.arena),
+      arena: arena
+    )
+  }
+}
+
+extension Parser {
+  mutating func parseDeclarationOrIfConfig() -> RawDeclSyntax {
+    if self.at(.poundIf) && !self.withLookahead({ $0.consumeIfConfigOfAttributes() }) {
+      return RawDeclSyntax(
+        self.parsePoundIfDirective({
+          .decls($0.parseMemberDeclList(until: { $0.atEndOfIfConfigClauseBody() }))
+        })
+      )
+    } else {
+      return parseDeclaration(in: .memberDeclList)
+    }
+  }
+}

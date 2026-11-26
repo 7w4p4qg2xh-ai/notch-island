@@ -53,6 +53,8 @@ public struct DraggableProgressBar: View {
             }
         }
         .frame(height: compact ? (Defaults[.inlineOSD] ? 6 : 7) : (Defaults[.inlineOSD] ? (isDragging ? 8 : 5) : (isDragging ? 9 : 6)))
+        // 只有「拖拽中变粗」这一件事做动画；进度本身绝不参与动画。
+        .animation(StandardAnimations.ui, value: isDragging)
     }
 
     private func fillStyle() -> AnyShapeStyle {
@@ -90,15 +92,16 @@ public struct DraggableProgressBar: View {
     private func dragGesture(in geo: GeometryProxy) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { gesture in
-                withAnimation(.smooth(duration: 0.12)) {
-                    isDragging = true
-                    updateValue(from: gesture.location.x, in: geo.size.width)
-                }
+                // 🔴 11-24 HIG 审查 P0：手势必须 1:1 跟手。
+                // 这里原来每帧都开一条 withAnimation(.smooth(0.12))，等于让填充条
+                // 永远落后手指 0.12 秒（拖动时"拖泥带水"的机械成因）。
+                // 现在只改状态值；isDragging 引起的高度变化交给外层
+                // `.animation(StandardAnimations.ui, value: isDragging)`。
+                isDragging = true
+                updateValue(from: gesture.location.x, in: geo.size.width)
             }
             .onEnded { _ in
-                withAnimation(.smooth(duration: 0.12)) {
-                    isDragging = false
-                }
+                isDragging = false
             }
     }
 
