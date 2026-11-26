@@ -389,6 +389,14 @@ struct PeripheralDeviceBattery: Equatable {
     var left: Int?
     var right: Int?
     var caseLevel: Int?
+    /// 11-24: `system_profiler` 的 `device_minorType`。iPhone / iPad /
+    /// Apple Watch 这类走 BLE 的设备**根本没有这个键**，而旧逻辑把「空类别」
+    /// 当成耳机，于是手机手表一靠近就弹「耳机已连接」，断开再弹「已转移到
+    /// 其它设备」（`~/bn-airpods.log` 里 iPhone / Ultra 各有多次记录）。
+    var minorType: String = ""
+    /// 11-24: productID 命中 AirPods/Beats 型号表 —— 比类别更硬的耳机证据，
+    /// 保证改了名的 AirPods 和没报 minorType 的苹果耳机照样认得出。
+    var isKnownHeadphoneModel: Bool = false
 
     var hasBattery: Bool { main != nil || left != nil || right != nil || caseLevel != nil }
     var lowestLevel: Int? { [main, left, right, caseLevel].compactMap { $0 }.min() }
@@ -411,10 +419,18 @@ struct PeripheralDeviceBattery: Equatable {
     /// 11-16: 图标现在是分机型的（`airpodspro` / `airpodsmax` / `beats.*`），
     /// 只认 `== "headphones"` 会把改名成「AP5」的 AirPods 判成非耳机，
     /// 连接卡直接不弹 —— 所以按前缀一起认。
+    /// 🔴 11-24: 不能只靠图标。`system_profiler` 里 iPhone / iPad / Apple Watch
+    /// 不带 `device_minorType`，旧逻辑把「空类别」当耳机，于是一靠近就弹
+    /// 「耳机已连接」、断开再弹「已转移到其它设备」。现在要求三者之一成立：
+    /// 类别说是耳机 / 型号命中苹果耳机表 / 名字带耳机词。
     var looksLikeHeadphones: Bool {
-        if icon == "headphones" || icon.hasPrefix("airpods") || icon.hasPrefix("beats") {
+        let type = minorType.lowercased()
+        if type.contains("headphone") || type.contains("earphone") || type.contains("headset") {
             return true
         }
+        if isKnownHeadphoneModel { return true }
+        // 类别明确（键盘 / 鼠标 / 音箱 / 手机 / 手表…）就直接判非耳机。
+        guard type.isEmpty else { return false }
         let name = self.name.lowercased()
         return name.contains("airpods")
             || name.contains("beats")
@@ -489,13 +505,16 @@ final class PeripheralBatteryManager: ObservableObject {
         // 11-15: 15s + 30s was far too slow for "the moment AirPods connect",
         // and CoreAudio alone is not enough (macOS often asks the user to
         // confirm the connection first, so the output device never switches).
-        // system_profiler stays on a background queue; 2s/4s is responsive
-        // without a permanent busy loop.
+        // system_profiler stays on a background queue.
+        // 🔴 11-22: 每一轮轮询都是一整个 system_profiler SPBluetoothDataType
+        // 进程（单次 1~3s，全程查询 blued）。4s 一轮被实测证实拖慢 AirPods
+        // 在设备间切换——用户退出本 app 立刻恢复秒切。兜底轮询退到 30s，
+        // 实时性改由 CoreAudio 事件驱动（AudioDeviceConnectionWatcher）。
         pollTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
+            try? await Task.sleep(for: .seconds(1))
             while !Task.isCancelled {
                 await self?.pollOnce()
-                try? await Task.sleep(for: .seconds(4))
+                try? await Task.sleep(for: .seconds(30))
             }
         }
     }
@@ -535,7 +554,11 @@ final class PeripheralBatteryManager: ObservableObject {
         // duplicate and take the whole app down.
         let previousByName = Dictionary(previous.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
 
-        for device in snapshot where device.hasBattery {
+        // 11-21: 不能只遍历有电量的设备。AirPods Max 的电量 system_profiler
+        // 不暴露（系统弹窗走私有渠道能读 96%，公开接口拿不到），但它仍是耳机。
+        // 用 looksLikeHeadphones 放行，让没电量的耳机也能弹连接卡；低电量逻辑
+        // 对 nil 电量天然返回 false，不会误报。
+        for device in snapshot where device.hasBattery || device.looksLikeHeadphones {
             guard let old = previousByName[device.name] else {
                 // Newly connected: greet it and (re)arm the low-battery alert.
                 // Headphones get the iPhone-style connection card; everything
@@ -579,6 +602,9 @@ final class PeripheralBatteryManager: ObservableObject {
     }
 
     private func peek(_ device: PeripheralDeviceBattery, isConnection: Bool = false) {
+        // 11-24: 兜底闸门。无电量、又不是耳机的设备（iPhone / iPad / Apple
+        // Watch 这类 BLE 设备）永远不该进岛卡，哪怕以后又多一条调用路径。
+        guard device.hasBattery || device.looksLikeHeadphones else { return }
         if isConnection {
             if let last = lastConnectionPeekAt[device.name],
                Date().timeIntervalSince(last) < 30 { return }
@@ -650,6 +676,36 @@ final class PeripheralBatteryManager: ObservableObject {
         systemPromptWindow = nil
     }
 
+    // MARK: 11-22 事件驱动入口（替代 4s 高频轮询）
+
+    /// CoreAudio 两个监听（默认输出切换 + 音频设备列表变化）统一汇到这里。
+    /// 同一次耳机连接/离开会连发好几个 CoreAudio 事件，400ms 内合并成一次
+    /// 处理，避免事件风暴变成 system_profiler 连发。处理内容 =
+    /// pollOnce()（完整快照：新设备问候 + 转移检测）
+    /// + handlePossibleConnection()（blued 电量晚到，需要连拍兜底）。
+    private var handlingAudioEvent = false
+    private var pendingAudioEvent = false
+
+    @MainActor
+    func handleAudioEvent() {
+        guard Defaults[.peripheralBatteryEnabled] else { return }
+        if handlingAudioEvent {
+            pendingAudioEvent = true
+            return
+        }
+        handlingAudioEvent = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(400))
+            await self.pollOnce()
+            await self.handlePossibleConnection()
+            self.handlingAudioEvent = false
+            if self.pendingAudioEvent {
+                self.pendingAudioEvent = false
+                self.handleAudioEvent()
+            }
+        }
+    }
+
     /// 11-15: called by BOTH the CoreAudio output-device change and the system
     /// Bluetooth prompt watcher. bluetoothd publishes battery levels a beat
     /// AFTER the prompt / route change, so take a few quick snapshots instead
@@ -668,8 +724,10 @@ final class PeripheralBatteryManager: ObservableObject {
             knownDevices = snapshot
             connectedDevices = snapshot
             // 11-17: primary signal is still a NEW device name (name-diff).
+            // 11-21: 去掉 hasBattery 硬门槛——AirPods Max 被系统认作耳机
+            // （icon=airpodsmax）但 system_profiler 不报电量，照样要弹卡。
             var found = snapshot.first {
-                $0.hasBattery && $0.looksLikeHeadphones && !before.contains($0.name)
+                $0.looksLikeHeadphones && !before.contains($0.name)
             }
             // 11-17 fallback: CoreAudio fired because audio ROUTED to a
             // headphone, but the name was already in our baseline (app
@@ -683,7 +741,7 @@ final class PeripheralBatteryManager: ObservableObject {
                     .lowercased()
                 if !outputName.isEmpty {
                     found = snapshot.first { device in
-                        guard device.hasBattery, device.looksLikeHeadphones else { return false }
+                        guard device.looksLikeHeadphones else { return false }  // 11-21: 不再要求 hasBattery
                         let n = device.name.lowercased()
                         return outputName.contains(n) || n.contains(outputName)
                     }
@@ -715,6 +773,28 @@ final class PeripheralBatteryManager: ObservableObject {
 
     var peekIcon: String { peekDevice?.icon ?? "dot.radiowaves.left.and.right" }
 
+    /// 11-21: 音量 HUD 用的机型图标。按「当前 CoreAudio 输出设备名」在已连接
+    /// 设备里找对应耳机，返回它的 Product-ID 机型图标（airpods / airpodspro /
+    /// airpodsmax / beats.* / headphones）。这样改名成 AP5 的 AirPods 也能在
+    /// 音量条上显示 AirPods 图标，头戴式显示头戴图标，两者明确区分。
+    /// 找不到匹配（输出不是蓝牙耳机 / 数据还没到）时返回 nil，由调用方回落到
+    /// 原来的 CoreAudio 名字分类。
+    @MainActor
+    func currentHeadphoneIcon() -> String? {
+        let outputName = AudioOutputRouteResolver.shared.currentOutputDeviceName()
+        guard !outputName.isEmpty else { return nil }
+        let needle = outputName.lowercased()
+        for device in connectedDevices where device.looksLikeHeadphones {
+            let name = device.name.lowercased()
+            // 双向包含：CoreAudio 名可能是 "AP5" 而蓝牙名是 "AP5"，也可能是
+            // 带后缀的长名，任一方是另一方的子串都算同一台。
+            if needle.contains(name) || name.contains(needle) {
+                return device.icon
+            }
+        }
+        return nil
+    }
+
     // MARK: Data source
 
     nonisolated private static func fetchSnapshot() async -> [PeripheralDeviceBattery] {
@@ -741,7 +821,81 @@ final class PeripheralBatteryManager: ObservableObject {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         guard process.terminationStatus == 0, !data.isEmpty else { return [] }
-        return parseBluetoothReport(data)
+        var devices = parseBluetoothReport(data)
+        // 🔴 11-21：AirPods Max 的电量 system_profiler 根本不导出 —— 同一份
+        // JSON 里 AP5（同样未连接）Left/Right/Case 三个键都在，Max 一个
+        // battery 键都没有，所以不是解析问题。而系统自己那条「AirPods Max
+        // 已连接」通知能画出 34%，说明值在 powerd 的配件电量表里；
+        // `pmset -g accps` 是公开命令、不要蓝牙 TCC、不碰私有框架，直接读它
+        // 补空缺。实测：` -AirPods Max (id=45094193)	34%`，和系统通知的
+        // 34 完全一致。
+        Self.fillMissingLevels(&devices, from: Self.accessoryPowerLevels())
+        return devices
+    }
+
+    /// `pmset -g accps` → ["AirPods Max": 34]。
+    /// 输出形如（每台一行，名字可能为空）：
+    /// ```
+    ///  -InternalBattery-0 (id=24051811)	80%; AC attached; not charging present: true
+    ///  - (id=375652352)	86%; discharging present: true
+    ///  -AirPods Max (id=45094193)	34%; discharging present: true
+    /// ```
+    /// 名字为空的条目无从对应设备，直接跳过。
+    nonisolated private static func accessoryPowerLevels() -> [String: Int] {
+        let pipe = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+        process.arguments = ["-g", "accps"]
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return [:]
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let text = String(data: data, encoding: .utf8) else { return [:] }
+
+        var levels: [String: Int] = [:]
+        for raw in text.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("-"), let idRange = line.range(of: " (id=") else { continue }
+            let name = String(line[line.index(after: line.startIndex)..<idRange.lowerBound])
+                .trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { continue }
+            guard let closeParen = line.range(of: ")", range: idRange.upperBound..<line.endIndex),
+                  let level = Int(line[closeParen.upperBound...]
+                    .drop { !$0.isNumber }
+                    .prefix { $0.isNumber }) else { continue }
+            levels[name] = level
+        }
+        return levels
+    }
+
+    /// 只给「system_profiler 一个电量键都没有」的设备补值：
+    /// 耳塞（AP5/Pro）本来就有 L/R/Case，别用合并值覆盖。
+    nonisolated private static func fillMissingLevels(
+        _ devices: inout [PeripheralDeviceBattery],
+        from levels: [String: Int]
+    ) {
+        guard !levels.isEmpty else { return }
+        for index in devices.indices where !devices[index].hasBattery {
+            let name = devices[index].name
+            // 先精确匹配，再双向包含（名字被改过、pmset 多一段后缀都能认）。
+            if let exact = levels[name] {
+                devices[index].main = exact
+                continue
+            }
+            let lowered = name.lowercased()
+            if let matched = levels.first(where: { key, _ in
+                let candidate = key.lowercased()
+                return candidate.contains(lowered) || lowered.contains(candidate)
+            }) {
+                devices[index].main = matched.value
+            }
+        }
     }
 
     nonisolated private static func parseBluetoothReport(_ data: Data) -> [PeripheralDeviceBattery] {
@@ -757,19 +911,23 @@ final class PeripheralBatteryManager: ObservableObject {
                 guard let properties = entry.values.first as? [String: Any] else { continue }
                 let name = entry.keys.first ?? "Bluetooth Device"
                 let minorType = properties["device_minorType"] as? String ?? ""
+                let productID = hexValue(properties["device_productID"])
+                let vendorID = hexValue(properties["device_vendorID"])
                 devices.append(
                     PeripheralDeviceBattery(
                         name: name,
                         icon: icon(
                             for: minorType,
                             name: name,
-                            productID: hexValue(properties["device_productID"]),
-                            vendorID: hexValue(properties["device_vendorID"])
+                            productID: productID,
+                            vendorID: vendorID
                         ),
                         main: percentValue(properties["device_batteryLevelMain"]),
                         left: percentValue(properties["device_batteryLevelLeft"]),
                         right: percentValue(properties["device_batteryLevelRight"]),
-                        caseLevel: percentValue(properties["device_batteryLevelCase"])
+                        caseLevel: percentValue(properties["device_batteryLevelCase"]),
+                        minorType: minorType,
+                        isKnownHeadphoneModel: airPodsSymbol(productID) != nil
                     )
                 )
             }
@@ -809,8 +967,10 @@ final class PeripheralBatteryManager: ObservableObject {
         let type = minorType.lowercased()
         let lowered = name.lowercased()
 
-        if type.contains("headphone") || type.isEmpty {
-            if let symbol = airPodsSymbol(productID) { return symbol }
+        // 11-24: 型号表是最硬的证据 —— 有没有 minorType 都先认。
+        if let symbol = airPodsSymbol(productID) { return symbol }
+
+        if type.contains("headphone") || type.contains("earphone") || type.contains("headset") {
             // 名字里带机型的（没被改名的设备）也认一下
             if lowered.contains("airpods max") { return "airpodsmax" }
             if lowered.contains("airpods pro") { return "airpodspro" }
@@ -825,6 +985,17 @@ final class PeripheralBatteryManager: ObservableObject {
         if type.contains("trackpad") { return "trackpad" }
         if type.contains("game") { return "gamecontroller" }
         if type.contains("speaker") { return "hifispeaker" }
+        // 🔴 11-24: 这一句原来是 `if type.contains("headphone") || type.isEmpty`。
+        // 空类别被当成耳机，于是 iPhone / iPad / Apple Watch 全拿到耳机图标，
+        // 苹果设备还会因为 vendorID == 0x004C 显示成 AirPods。现在空类别只按
+        // 名字认耳机，其它一律通用蓝牙图标。
+        if type.isEmpty {
+            if lowered.contains("airpods max") { return "airpodsmax" }
+            if lowered.contains("airpods pro") { return "airpodspro" }
+            if lowered.contains("airpods") { return "airpods" }
+            if lowered.contains("beats") { return "beats.headphones" }
+            if lowered.contains("headphone") || lowered.contains("耳机") { return "headphones" }
+        }
         return "dot.radiowaves.left.and.right"
     }
 
@@ -861,32 +1032,43 @@ final class PeripheralBatteryManager: ObservableObject {
 /// long after the earbuds were already in. This is a public API with no TCC
 /// prompt — the app already listens to the same property in VolumeManager.
 /// Appended here rather than in a new .swift file (pbxproj discipline).
+/// 🔴 11-22: 4s system_profiler 轮询被实测证实拖慢 AirPods 跨设备切换，本类
+/// 从「连接卡事件的补充」升级为实时检测的主信号源。现在监听两个属性：
+/// 默认输出切换（AirPods 接管/交还）+ 音频设备列表变化（AirPods 已出现在
+/// 系统里但尚未被确认为默认输出，比如连接确认气泡还挂着的情况）。两个源
+/// 都汇到 PeripheralBatteryManager.handleAudioEvent() 合并处理。
 final class AudioDeviceConnectionWatcher {
     static let shared = AudioDeviceConnectionWatcher()
 
     private var started = false
-    private var address: AudioObjectPropertyAddress?
-    private var listener: AudioObjectPropertyListenerBlock?
+    private var addresses: [AudioObjectPropertyAddress] = []
+    private var blocks: [AudioObjectPropertyListenerBlock] = []
     private let queue = DispatchQueue(label: "com.notchisland.audio-device-watcher")
 
     func start() {
         guard !started else { return }
         started = true
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        let block: AudioObjectPropertyListenerBlock = { _, _ in
-            Task { @MainActor in
-                await PeripheralBatteryManager.shared.handlePossibleConnection()
+        let selectors: [AudioObjectPropertySelector] = [
+            kAudioHardwarePropertyDefaultOutputDevice,
+            kAudioHardwarePropertyDevices,
+        ]
+        for selector in selectors {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: selector,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            let block: AudioObjectPropertyListenerBlock = { _, _ in
+                Task { @MainActor in
+                    PeripheralBatteryManager.shared.handleAudioEvent()
+                }
             }
+            guard AudioObjectAddPropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &addr, queue, block
+            ) == noErr else { continue }
+            addresses.append(addr)
+            blocks.append(block)
         }
-        guard AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &addr, queue, block
-        ) == noErr else { return }
-        address = addr
-        listener = block
     }
 }
 
@@ -978,7 +1160,7 @@ final class BluetoothPromptHider {
         var out: [BubbleCandidate] = []
         for w in list {
             guard let owner = w[kCGWindowOwnerName as String] as? String else { continue }
-            if owner == "Notch Island" || owner == "Boring Notch" { continue }
+            if owner == "Notch Island" || owner == "Notch Island" { continue }
             let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
             let y = b["Y"] as? Double ?? 0
             let wd = b["Width"] as? Double ?? 0

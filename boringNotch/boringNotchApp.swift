@@ -78,14 +78,14 @@ struct DynamicNotchApp: App {
                     }
                     return
                 }
-                NSLog("Failed to migrate legacy Boring Notch app bundle at %@", sourceURL.path)
+                NSLog("Failed to migrate legacy Notch Island app bundle at %@", sourceURL.path)
             }
             updaterController.startUpdater()
         }
     }
 
     var body: some Scene {
-        MenuBarExtra("boring.notch", systemImage: "sparkle", isInserted: $showMenuBarIcon) {
+        MenuBarExtra("Notch Island", systemImage: "sparkle", isInserted: $showMenuBarIcon) {
             Button("Settings") {
                 DispatchQueue.main.async {
                     SettingsWindowController.shared.showWindow()
@@ -93,7 +93,7 @@ struct DynamicNotchApp: App {
             }
             .keyboardShortcut(KeyEquivalent(","), modifiers: .command)
             CheckForUpdatesView(updater: updaterController.updater)
-            Button("Restart Boring Notch") {
+            Button("Restart Notch Island") {
                 ApplicationRelauncher.restart()
             }
             Button("Quit", role: .destructive) {

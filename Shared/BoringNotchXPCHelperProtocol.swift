@@ -9,7 +9,7 @@ import Foundation
 
 enum BoringNotchAppBundleNames {
     static let legacy = "boringNotch.app"
-    static let current = "Boring Notch.app"
+    static let current = "Notch Island.app"
 }
 
 @objc protocol BoringNotchXPCHelperLunarListener {
@@ -68,6 +68,18 @@ final class BNLunarBrightnessEvent: NSObject, NSSecureCoding {
     func clearNotificationBanner(_ token: String, with reply: @escaping (Bool) -> Void)
     func revealNotification(_ token: String, with reply: @escaping (Bool) -> Void)
     func setNotificationPassthrough(_ enabled: Bool)
+    /// Told by the app while the Siri panel is open.
+    ///
+    /// 🔴 The Siri panel (`com.apple.SiriNCService`) is positioned relative to
+    /// the NotificationCenter host window, so parking that host off-screen
+    /// drags the panel off-screen too — clicking the menu-bar Siri icon then
+    /// shows nothing at all. While Siri is up the host has to stay put, so the
+    /// helper gives every parked window back and stops parking.
+    ///
+    /// The *detection* has to live in the app: `CGWindowListCopyWindowInfo`
+    /// returns nil inside this sandboxed helper (measured 2026-11-22), while
+    /// the same call works in the app.
+    func setSiriYield(_ yielding: Bool)
 }
 
 @objc protocol BoringNotchXPCHelperDelegate {

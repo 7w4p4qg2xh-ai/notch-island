@@ -18,7 +18,7 @@ struct WebcamSettingsView: View {
         Form {
             Section {
                 Defaults.Toggle(key: .showMirror) {
-                    Text("Enable boring mirror")
+                    Text("Enable mirror")
                 }
                 .disabled(!camera.cameraAvailable)
 

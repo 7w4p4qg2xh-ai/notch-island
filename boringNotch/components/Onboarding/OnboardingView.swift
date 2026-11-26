@@ -35,7 +35,7 @@ struct OnboardingView: View {
             switch step {
             case .welcome:
                 WelcomeView {
-                    withAnimation(.easeInOut(duration: 0.6)) {
+                    withAnimation(StandardAnimations.move) {
                         step = .cameraPermission
                     }
                 }
@@ -45,18 +45,18 @@ struct OnboardingView: View {
                 PermissionsRequestView(
                     icon: Image(systemName: "camera.fill"),
                     title: "Enable Camera Access",
-                    description: "Boring Notch includes a mirror feature that lets you quickly check your appearance using your camera, right from the notch. Camera access is required only to show this live preview. You can turn the mirror feature on or off at any time in the app.",
+                    description: "Notch Island includes a mirror feature that lets you quickly check your appearance using your camera, right from the notch. Camera access is required only to show this live preview. You can turn the mirror feature on or off at any time in the app.",
                     privacyNote: "Your camera is never used without your consent, and nothing is recorded or stored.",
                     onAllow: {
                         Task {
                             await requestCameraPermission()
-                            withAnimation(.easeInOut(duration: 0.6)) {
+                            withAnimation(StandardAnimations.move) {
                                 step = .calendarPermission
                             }
                         }
                     },
                     onSkip: {
-                        withAnimation(.easeInOut(duration: 0.6)) {
+                        withAnimation(StandardAnimations.move) {
                             step = .calendarPermission
                         }
                     }
@@ -67,18 +67,18 @@ struct OnboardingView: View {
                 PermissionsRequestView(
                     icon: Image(systemName: "calendar"),
                     title: "Enable Calendar Access",
-                    description: "Boring Notch can show all your upcoming events in one place. Access to your calendar is needed to display your schedule.",
+                    description: "Notch Island can show all your upcoming events in one place. Access to your calendar is needed to display your schedule.",
                     privacyNote: "Your calendar data is only used to show your events and is never shared.",
                     onAllow: {
                         Task {
                                 await requestCalendarPermission()
-                                withAnimation(.easeInOut(duration: 0.6)) {
+                                withAnimation(StandardAnimations.move) {
                                     step = .remindersPermission
                                 }
                         }
                     },
                     onSkip: {
-                            withAnimation(.easeInOut(duration: 0.6)) {
+                            withAnimation(StandardAnimations.move) {
                                 step = .remindersPermission
                             }
                     }
@@ -89,18 +89,18 @@ struct OnboardingView: View {
                     PermissionsRequestView(
                         icon: Image(systemName: "checklist"),
                         title: "Enable Reminders Access",
-                        description: "Boring Notch can show your scheduled reminders alongside your calendar events. Access to Reminders is needed to display your reminders.",
+                        description: "Notch Island can show your scheduled reminders alongside your calendar events. Access to Reminders is needed to display your reminders.",
                         privacyNote: "Your reminders data is only used to show your reminders and is never shared.",
                         onAllow: {
                             Task {
                                 await requestRemindersPermission()
-                                withAnimation(.easeInOut(duration: 0.6)) {
+                                withAnimation(StandardAnimations.move) {
                                     step = nextStepAfterReminders()
                                 }
                             }
                         },
                         onSkip: {
-                            withAnimation(.easeInOut(duration: 0.6)) {
+                            withAnimation(StandardAnimations.move) {
                                 step = nextStepAfterReminders()
                             }
                         }
@@ -111,7 +111,7 @@ struct OnboardingView: View {
                 PermissionsRequestView(
                     icon: Image(systemName: "waveform"),
                     title: "Enable Real-Time Audio",
-                    description: "Boring Notch can analyze the audio playing from your music app to draw a live FFT waveform in the notch, with only a minimal impact on CPU usage.",
+                    description: "Notch Island can analyze the audio playing from your music app to draw a live FFT waveform in the notch, with only a minimal impact on CPU usage.",
                     privacyNote: "Audio is processed locally for the visualizer and never recorded, stored, or shared.",
                     onAllow: {
                         Task {
@@ -119,13 +119,13 @@ struct OnboardingView: View {
                             if granted {
                                 Defaults[.realtimeAudioWaveform] = true
                             }
-                            withAnimation(.easeInOut(duration: 0.6)) {
+                            withAnimation(StandardAnimations.move) {
                                 step = .accessibilityPermission
                             }
                         }
                     },
                     onSkip: {
-                        withAnimation(.easeInOut(duration: 0.6)) {
+                        withAnimation(StandardAnimations.move) {
                             step = .accessibilityPermission
                         }
                     }
@@ -139,12 +139,12 @@ struct OnboardingView: View {
                     description: String(localized: "\(AccessibilityPermission.displayName) is only needed when using built-in macOS control sources for OSD replacement. External sources like BetterDisplay or Lunar do not require it. You can enable it later in OSD settings if needed."),
                     privacyNote: String(localized: "\(AccessibilityPermission.displayName) is used only to improve media and brightness notifications. No data is collected or shared."),
                     onAllow: {
-                        withAnimation(.easeInOut(duration: 0.6)) {
+                        withAnimation(StandardAnimations.move) {
                             step = .musicPermission
                         }
                     },
                     onSkip: {
-                        withAnimation(.easeInOut(duration: 0.6)) {
+                        withAnimation(StandardAnimations.move) {
                             step = .musicPermission
                         }
                     }
@@ -154,7 +154,7 @@ struct OnboardingView: View {
             case .musicPermission:
                 MusicControllerSelectionView(
                     onContinue: {
-                        withAnimation(.easeInOut(duration: 0.6)) {
+                        withAnimation(StandardAnimations.move) {
                             if BoringViewCoordinator.shared.firstLaunch {
                                 step = .softwareUpdatePermission
                             } else {
@@ -169,7 +169,7 @@ struct OnboardingView: View {
                 SoftwareUpdatePermissionView(
                     updater: updater,
                     onContinue: {
-                        withAnimation(.easeInOut(duration: 0.6)) {
+                        withAnimation(StandardAnimations.move) {
                             BoringViewCoordinator.shared.firstLaunch = false
                             step = .finished
                         }
@@ -226,11 +226,11 @@ struct SoftwareUpdatePermissionView: View {
                 .symbolRenderingMode(.hierarchical)
                 .foregroundColor(.effectiveAccent)
 
-            Text("Keep Boring Notch Updated")
+            Text("Keep Notch Island Updated")
                 .font(.title)
                 .fontWeight(.semibold)
 
-            Text("Boring Notch can check for updates in the background. You can still check manually from the menu bar at any time.")
+            Text("Notch Island can check for updates in the background. You can still check manually from the menu bar at any time.")
                 .multilineTextAlignment(.center)
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 34)
